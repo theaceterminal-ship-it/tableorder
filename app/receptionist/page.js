@@ -546,11 +546,12 @@ function ReceptionPage() {
       if (list.length === 0 && !seededCategories.current) {
         seededCategories.current = true;
         for (let i = 0; i < DEFAULT_CATEGORIES.length; i++) {
-          await addDoc(collection(db, "restaurants", restaurantId, "categories"), { name: DEFAULT_CATEGORIES[i], imageUrl: "", order: i, createdAt: Date.now() });
+          const slug = DEFAULT_CATEGORIES[i].toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+          await setDoc(doc(db, "restaurants", restaurantId, "categories", slug), { name: DEFAULT_CATEGORIES[i], imageUrl: "", order: i, createdAt: Date.now() }, { merge: true });
         }
       }
       if (list.length > 0 && !list.some((c) => c.name === COMBO_CATEGORY)) {
-        await addDoc(collection(db, "restaurants", restaurantId, "categories"), { name: COMBO_CATEGORY, imageUrl: "", order: list.length, createdAt: Date.now() });
+        await setDoc(doc(db, "restaurants", restaurantId, "categories", "combo-packs"), { name: COMBO_CATEGORY, imageUrl: "", order: list.length, createdAt: Date.now() }, { merge: true });
       }
     });
     return () => unsub();
@@ -561,7 +562,7 @@ function ReceptionPage() {
     if (!restaurantId || categories.length === 0) return;
     const hasBarCat = categories.some((c) => c.name === BAR_CATEGORY);
     if (siteSettings.hasBar && !hasBarCat) {
-      addDoc(collection(db, "restaurants", restaurantId, "categories"), { name: BAR_CATEGORY, imageUrl: "", order: categories.length, createdAt: Date.now() });
+      setDoc(doc(db, "restaurants", restaurantId, "categories", "bar"), { name: BAR_CATEGORY, imageUrl: "", order: categories.length, createdAt: Date.now() }, { merge: true });
     }
     // Note: we don't auto-delete Bar when turned off, in case it still has items — receptionist can delete manually once empty.
   }, [siteSettings.hasBar, categories, restaurantId]);
