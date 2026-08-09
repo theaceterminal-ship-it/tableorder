@@ -30,6 +30,7 @@
 import { useEffect, useState, useRef } from "react";
 import { db } from "@/lib/firebase";
 import { uploadToCloudinary } from "@/lib/cloudinary";
+import JSZip from "jszip"; // npm install jszip
 import { playNotificationSound, requestNotificationPermission, showPopupNotification } from "@/lib/notifications";
 import { AuthGuard } from "@/lib/auth-guard";
 import { useAuth } from "@/lib/auth-context";
@@ -368,15 +369,23 @@ function ReceptionPage() {
   const [splitCount, setSplitCount] = useState(2);
   const [showSplash, setShowSplash] = useState(false);
   const [splashLeaving, setSplashLeaving] = useState(false);
+  const [showWaiterPopover, setShowWaiterPopover] = useState(false);
 
   // --- bulk import state ---
   const [showAddItem, setShowAddItem] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
-  const [importFormat, setImportFormat] = useState("csv");
+  const [importFormat, setImportFormat] = useState("csv"); // csv | json | zip
   const [importText, setImportText] = useState("");
   const [importPreview, setImportPreview] = useState(null);
   const [importing, setImporting] = useState(false);
   const [autoCreateCategories, setAutoCreateCategories] = useState(true);
+
+  // --- NEW: ZIP (CSV + photos) import state ---
+  const [zipFile, setZipFile] = useState(null);
+  const [zipImages, setZipImages] = useState({});
+  const [zipParsing, setZipParsing] = useState(false);
+  const [importProgress, setImportProgress] = useState({ done: 0, total: 0 });
+  const [importReport, setImportReport] = useState(null);
 
   // --- NEW: Smart Suggestions / Bundle rule engine state ---
   const [bundleRules, setBundleRules] = useState([]);
@@ -1163,6 +1172,7 @@ function ReceptionPage() {
       const chefSpecialRaw = row.chefspecial || row.chefSpecial || row.chef_special || row.chef || "no";
       const featuredRaw = row.featured || row.Featured || "no";
       const imageUrl = row.imageurl || row.imageUrl || row.image_url || row.image || "";
+      const imageFileRaw = row.imagefile || row.imageFile || row.image_file || "";
 
       const price = cleanPrice(priceRaw);
       if (!name.trim()) { errors.push(`Row ${idx + 1}: Name is required`); return; }
@@ -1178,12 +1188,108 @@ function ReceptionPage() {
         chefSpecial: normalizeBool(chefSpecialRaw),
         featured: normalizeBool(featuredRaw),
         imageUrl: imageUrl.trim(),
+        imageFile: imageFileRaw.trim(),
         isCombo: false,
         available: true,
       });
     });
 
     return { items, errors };
+  }
+
+  // === NEW: ZIP (CSV + photos) helpers ===
+  // Matches an item's ImageFile value (from the CSV) to a file inside the zip's
+  // images/ folder — case-insensitive, and falls back to matching by filename
+  // with the extension ignored (so "dosa.jpg" in the CSV still matches "dosa.png").
+  function matchImageFile(filename, imagesMap) {
+    if (!filename) return null;
+    const base = filename.split("/").pop().toLowerCase().trim();
+    if (imagesMap[base]) return imagesMap[base];
+    const baseNoExt = base.replace(/\.[a-z0-9]+$/i, "");
+    const foundKey = Object.keys(imagesMap).find((k) => k.replace(/\.[a-z0-9]+$/i, "") === baseNoExt);
+    return foundKey ? imagesMap[foundKey] : null;
+  }
+
+  // Unzips the uploaded file, locates the first .csv inside it, and collects
+  // every image file into a flat { filename: JSZipObject } map (regardless of
+  // which subfolder it's actually in, so "images/x.jpg" is keyed just as "x.jpg").
+  async function extractZip(file) {
+    const zip = await JSZip.loadAsync(file);
+    let csvEntry = null;
+    const imagesMap = {};
+    zip.forEach((relPath, entry) => {
+      if (entry.dir) return;
+      const lower = relPath.toLowerCase();
+      if (lower.endsWith(".csv") && !csvEntry) csvEntry = entry;
+      else if (/\.(jpe?g|png|webp|gif)$/i.test(lower)) {
+        imagesMap[relPath.split("/").pop().toLowerCase()] = entry;
+      }
+    });
+    if (!csvEntry) throw new Error("No .csv file found inside the zip. Make sure menu.csv is at the top level.");
+    const csvText = await csvEntry.async("string");
+    return { csvText, imagesMap };
+  }
+
+  // Runs async tasks with a limited number in flight at once (default 5) instead
+  // of firing everything simultaneously or waiting for fixed batches to finish —
+  // keeps the browser and Cloudinary from being hit all at once, while still
+  // uploading continuously with no idle gaps between "rounds".
+  async function uploadWithConcurrency(tasks, concurrency, onProgress) {
+    let nextIndex = 0;
+    let doneCount = 0;
+    const results = new Array(tasks.length);
+    async function worker() {
+      while (nextIndex < tasks.length) {
+        const current = nextIndex++;
+        try { results[current] = await tasks[current](); }
+        catch (err) { results[current] = { error: err?.message || "Upload failed" }; }
+        doneCount++;
+        if (onProgress) onProgress(doneCount, tasks.length);
+      }
+    }
+    const workerCount = Math.min(concurrency, tasks.length) || 1;
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    return results;
+  }
+
+  async function handleZipFileSelected(file) {
+    if (!file) return;
+    setZipFile(file);
+    setZipParsing(true);
+    setImportPreview(null);
+    setImportReport(null);
+    try {
+      const { csvText, imagesMap } = await extractZip(file);
+      setZipImages(imagesMap);
+      const result = parseImportData(csvText, "csv");
+      if (result.error) {
+        setImportPreview({ error: result.error, items: [], categoriesNeeded: [], duplicates: [], valid: false });
+        return;
+      }
+      finalizePreview(result.items, result.errors, imagesMap);
+    } catch (err) {
+      setImportPreview({ error: err.message, items: [], categoriesNeeded: [], duplicates: [], valid: false });
+    } finally {
+      setZipParsing(false);
+    }
+  }
+
+  async function downloadZipTemplate() {
+    const zip = new JSZip();
+    zip.file("menu.csv",
+`Name,Price,Category,Description,FoodType,ChefSpecial,Featured,ImageFile
+Paneer Tikka,320,Starters,Cottage cheese marinated in spices,veg,no,no,paneer-tikka.jpg
+Butter Chicken,450,Mains,Tender chicken in rich tomato gravy,nonveg,yes,yes,butter-chicken.jpg
+Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,
+`);
+    zip.file("images/README.txt", "Put your photos in this folder.\nName each file to exactly match the ImageFile column in menu.csv (e.g. paneer-tikka.jpg).\nSupported formats: jpg, jpeg, png, webp, gif.");
+    const blob = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "menu-import-template.zip";
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   function buildImportPreview() {
@@ -1193,27 +1299,49 @@ function ReceptionPage() {
       setImportPreview({ error: result.error, items: [], categoriesNeeded: [], duplicates: [], valid: false });
       return;
     }
+    finalizePreview(result.items, result.errors, null);
+  }
 
+  // Shared by the CSV/JSON text path and the ZIP path — works out which
+  // categories are new, which items are duplicates, and (when imagesMap is
+  // provided, i.e. this came from a zip) whether each item's photo was found.
+  function finalizePreview(items, errors, imagesMap) {
     const existingNames = new Set(menuItems.map((m) => m.name.toLowerCase()));
     const existingCategories = new Set(categories.map((c) => c.name));
     const categoriesNeeded = [];
     const duplicates = [];
+    const imageStats = { matched: 0, missing: 0, urlOnly: 0, none: 0 };
 
-    result.items.forEach((item) => {
+    const itemsWithImageStatus = items.map((item) => {
       if (!existingCategories.has(item.category) && !categoriesNeeded.includes(item.category)) {
         categoriesNeeded.push(item.category);
       }
       if (existingNames.has(item.name.toLowerCase())) {
         duplicates.push(item.name);
       }
+
+      let imageMatchStatus = "none";
+      let zipEntry = null;
+      if (imagesMap && item.imageFile) {
+        zipEntry = matchImageFile(item.imageFile, imagesMap);
+        imageMatchStatus = zipEntry ? "matched" : "missing";
+      } else if (item.imageUrl) {
+        imageMatchStatus = "url";
+      }
+      const statKey = imageMatchStatus === "matched" ? "matched" : imageMatchStatus === "missing" ? "missing" : imageMatchStatus === "url" ? "urlOnly" : "none";
+      imageStats[statKey]++;
+
+      return { ...item, imageMatchStatus, _zipEntry: zipEntry };
     });
 
     setImportPreview({
-      items: result.items,
-      errors: result.errors,
+      items: itemsWithImageStatus,
+      errors,
       categoriesNeeded,
       duplicates,
-      valid: result.errors.length === 0,
+      valid: errors.length === 0,
+      isZip: !!imagesMap,
+      imageStats,
     });
   }
 
@@ -1237,34 +1365,81 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     if (!restaurantId) return;
 
     setImporting(true);
+    setImportReport(null);
+    setImportProgress({ done: 0, total: 0 });
     try {
-      const batch = writeBatch(db);
+      const existingNames = new Set(menuItems.map((m) => m.name.toLowerCase()));
+      const itemsToImport = importPreview.items.filter((it) => !existingNames.has(it.name.toLowerCase()));
+
+      // For zip imports: upload every matched photo to Cloudinary first (5 at a
+      // time, continuously — see uploadWithConcurrency), then swap each item's
+      // imageUrl for the real Cloudinary URL before writing anything to Firestore.
+      let imagesUploaded = 0;
+      let imagesFailed = 0;
+      if (importPreview.isZip) {
+        const toUpload = itemsToImport.filter((it) => it.imageMatchStatus === "matched" && it._zipEntry);
+        setImportProgress({ done: 0, total: toUpload.length });
+        const results = await uploadWithConcurrency(
+          toUpload.map((it) => async () => {
+            const blob = await it._zipEntry.async("blob");
+            const file = new File([blob], it.imageFile || it.name, { type: blob.type || "image/jpeg" });
+            try { return await uploadToCloudinary(file); }
+            catch (err) { return await uploadToCloudinary(file); } // one retry
+          }),
+          5,
+          (done, total) => setImportProgress({ done, total })
+        );
+        toUpload.forEach((it, i) => {
+          const res = results[i];
+          if (res && typeof res === "string") { it.imageUrl = res; imagesUploaded++; }
+          else imagesFailed++;
+        });
+      }
+
       const menuCol = collection(db, "restaurants", restaurantId, "menuItems");
       const catCol = collection(db, "restaurants", restaurantId, "categories");
-
       const existingCats = new Set(categories.map((c) => c.name));
       const catsToCreate = importPreview.categoriesNeeded.filter((c) => !existingCats.has(c));
-      for (const catName of catsToCreate) {
-        const ref = doc(catCol);
-        batch.set(ref, { name: catName, imageUrl: "", order: categories.length + catsToCreate.indexOf(catName), createdAt: Date.now() });
-      }
 
-      const existingNames = new Set(menuItems.map((m) => m.name.toLowerCase()));
+      // Firestore batches cap at 500 writes, so chunk in groups of 400 to stay
+      // safely under that even for large imports.
+      const CHUNK_SIZE = 400;
       let imported = 0;
-      for (const item of importPreview.items) {
-        if (existingNames.has(item.name.toLowerCase())) continue;
-        const ref = doc(menuCol);
-        batch.set(ref, { ...item, createdAt: Date.now() });
-        imported++;
+      let firstChunk = true;
+      for (let i = 0; i < itemsToImport.length || firstChunk; i += CHUNK_SIZE) {
+        const chunkBatch = writeBatch(db);
+        if (firstChunk) {
+          catsToCreate.forEach((catName, idx) => {
+            const ref = doc(catCol);
+            chunkBatch.set(ref, { name: catName, imageUrl: "", order: categories.length + idx, createdAt: Date.now() });
+          });
+        }
+        const chunkItems = itemsToImport.slice(i, i + CHUNK_SIZE);
+        chunkItems.forEach((item) => {
+          const { imageFile, imageMatchStatus, _zipEntry, ...cleanItem } = item;
+          const ref = doc(menuCol);
+          chunkBatch.set(ref, { ...cleanItem, createdAt: Date.now() });
+          imported++;
+        });
+        await chunkBatch.commit();
+        firstChunk = false;
+        if (itemsToImport.length === 0) break;
       }
 
-      await batch.commit();
-
+      setImportReport({
+        imported,
+        imagesUploaded,
+        imagesMissing: importPreview.imageStats?.missing || 0,
+        imagesFailed,
+        invalidRows: importPreview.errors.length,
+        duplicatesSkipped: importPreview.duplicates.length,
+        categoriesCreated: catsToCreate.length,
+      });
       setImporting(false);
-      setShowImportModal(false);
       setImportText("");
       setImportPreview(null);
-      alert(`${imported} item(s) imported successfully!${catsToCreate.length > 0 ? ` ${catsToCreate.length} new categor${catsToCreate.length === 1 ? "y" : "ies"} created.` : ""}`);
+      setZipFile(null);
+      setZipImages({});
     } catch (err) {
       setImporting(false);
       alert("Import failed: " + err.message);
@@ -1502,9 +1677,60 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
 
     return (
       <div>
-        <div style={{ marginBottom: 24 }}>
-          <h2 style={{ fontSize: 24, fontWeight: 800, marginBottom: 2, fontFamily: "'Fraunces', serif" }}>Today at {profile?.name || "your restaurant"}</h2>
-          <p style={{ fontSize: 13.5, color: "var(--text-secondary, #6b6b7b)", margin: 0 }}>{new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" })}</p>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 24, gap: 12 }}>
+        <div>
+         <h2 style={{ fontSize: 24, fontWeight: 800, marginBottom: 2, fontFamily: "'Fraunces', serif" }}>Today at {profile?.name || "your restaurant"}</h2>
+        <p style={{ fontSize: 13.5, color: "var(--text-secondary, #6b6b7b)", margin: 0 }}>{new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" })}</p>
+        </div>
+
+        <div style={{ position: "relative", flexShrink: 0 }}>
+          <button
+          onClick={() => setShowWaiterPopover((s) => !s)}
+          style={{ width: 46, height: 46, borderRadius: "50%", border: "none", background: "#1a1a2e", color: "#fff", fontSize: 20, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", position: "relative", boxShadow: "0 2px 10px rgba(26,26,46,0.25)" }}
+          >
+          🛎️
+          {pendingWaiterCalls.length > 0 && (
+           <span style={{ position: "absolute", top: -4, right: -4, background: "#dc2626", color: "#fff", fontSize: 10.5, fontWeight: 800, minWidth: 19, height: 19, borderRadius: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 4px", border: "2px solid var(--bg, #faf8f2)" }}>
+           {pendingWaiterCalls.length}
+           </span>
+          )}
+         </button>
+
+         {showWaiterPopover && (
+          <>
+           <div onClick={() => setShowWaiterPopover(false)} style={{ position: "fixed", inset: 0, zIndex: 59 }} />
+            <div style={{ position: "absolute", top: "calc(100% + 10px)", right: 0, width: 320, maxHeight: 420, overflowY: "auto", background: "var(--surface, #fff)", borderRadius: 16, boxShadow: "0 12px 40px rgba(0,0,0,0.18)", border: "1px solid var(--border, #e6e1d6)", zIndex: 60 }}>
+              <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border, #e6e1d6)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+               <h3 style={{ fontSize: 14.5, fontWeight: 800, margin: 0 }}>🛎️ Waiter Calls</h3>
+               <button onClick={() => setShowWaiterPopover(false)} style={{ background: "none", border: "none", color: "#888", cursor: "pointer", fontSize: 16 }}>✕</button>
+              </div>
+              <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+               {waiterCalls.length === 0 ? (
+                <p style={{ fontSize: 13, color: "#999", textAlign: "center", padding: "24px 0" }}>No waiter calls yet.</p>
+                 ) : waiterCalls.slice(0, 15).map((c) => {
+                const reason = WAITER_REASONS.find((r) => r.label === c.reason) || { icon: "✋", label: c.reason };
+                 return (
+                   <div key={c.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderRadius: 10, background: c.status === "pending" ? "#fef2f2" : "var(--surface-2, #f3efe6)" }}>
+                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                       <span style={{ fontSize: 18 }}>{reason.icon}</span>
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: 13 }}>Table {c.table} — {reason.label}</div>
+                         <div style={{ fontSize: 11, color: "#888" }}>{new Date(c.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+                        </div>
+                        </div>
+                        {c.status === "pending" ? (
+                        <button className="btn btn-sm btn-primary" onClick={() => acknowledgeWaiterCall(c.id)}>Ack</button>
+                        ) : (
+                          <button className="btn btn-sm btn-ghost" onClick={() => dismissWaiterCall(c.id)}>✕</button>
+                        )}
+                      </div>
+                    );
+                  })}
+               </div>
+              </div>
+            </>
+          )}
+           </div>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))", gap: 14, marginBottom: 24 }}>
@@ -1513,8 +1739,6 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
           <StatCard label="Items Sold" value={todayItemsSold} color="#e8a33d" onClick={() => { setDashboardView("items"); setAnalyticsFilter("today"); }} />
           <StatCard label="Needs Attention" value={pending.length + billRequested.length + pendingWaiterCalls.length} color="#dc2626" sub={pending.length + billRequested.length + pendingWaiterCalls.length > 0 ? "Action needed now" : "All caught up"} onClick={() => setOrderFilter(pending.length > 0 ? "pending" : "billRequested")} />
         </div>
-
-        {renderWaiterCallsPanel()}
 
         <div className="card" style={{ borderRadius: 18, overflow: "hidden" }}>
           <div style={{ padding: "18px 20px 0" }}>
@@ -1559,7 +1783,12 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                     )}
                   </OrderCard>
                 ))}
-                {orderFilter === "served" && currentData.map((o) => <OrderCard key={o.id} order={o} />)}
+                {orderFilter === "served" && currentData.map((o) => (
+                  <OrderCard key={o.id} order={o}>
+                    <button className="btn btn-sm btn-primary" onClick={() => generateBill(o, false)} style={{ flex: 1 }}>Generate Bill</button>
+                    {billing.upiId && <button className="btn btn-sm btn-ghost" onClick={() => generateBill(o, true)} style={{ flex: 1 }}>Bill + QR</button>}
+                  </OrderCard>
+                ))}
                 {orderFilter === "billRequested" && currentData.map((o) => (
                   <OrderCard key={o.id} order={o}>
                     <button className="btn btn-sm btn-primary" onClick={() => generateBill(o, false)} style={{ flex: 1 }}>Generate Bill</button>
@@ -1623,31 +1852,9 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     return (
       <div>
         <h2 style={{ fontSize: 24, fontWeight: 800, marginBottom: 20, fontFamily: "'Fraunces', serif" }}>Point of Sale</h2>
-        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "220px 1fr 320px", gap: 18, alignItems: "flex-start" }}>
+        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 320px", gap: 18, alignItems: "flex-start" }}>
 
-          {/* LEFT: table grid + quick order */}
-          <div className="card" style={{ padding: 16, borderRadius: 16 }}>
-            <button
-              onClick={() => { setPosOrderType(posOrderType === "takeaway" ? "dinein" : "takeaway"); setPosTable(null); }}
-              className="btn"
-              style={{ width: "100%", marginBottom: 14, background: posOrderType === "takeaway" ? "#8b5cf6" : "var(--surface-2, #f3efe6)", color: posOrderType === "takeaway" ? "#fff" : "#555" }}
-            >📦 {posOrderType === "takeaway" ? "Quick Order Active" : "Quick Order (Takeaway)"}</button>
-            <div style={{ fontSize: 11.5, fontWeight: 800, color: "#888", textTransform: "uppercase", marginBottom: 8 }}>Tables</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, maxHeight: 420, overflowY: "auto" }}>
-              {tables.map((t) => {
-                const activeCount = orders.filter((o) => o.table === t.number && !["paid", "cancelled", "declined", "merged"].includes(o.status)).length;
-                const isSelected = posOrderType === "dinein" && posTable === t.number;
-                return (
-                  <button key={t.id} onClick={() => { setPosOrderType("dinein"); setPosTable(t.number); }}
-                    style={{ padding: "10px 4px", borderRadius: 10, border: isSelected ? "2px solid #1a1a2e" : "2px solid transparent", background: activeCount > 0 ? "#fee2e2" : "#dcfce7", color: activeCount > 0 ? "#991b1b" : "#166534", fontWeight: 800, fontSize: 13, cursor: "pointer" }}>
-                    {t.number}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* CENTER: menu browser */}
+          {/* MENU: menu browser */}
           <div className="card" style={{ padding: 16, borderRadius: 16 }}>
             <input placeholder="Search menu..." value={posSearch} onChange={(e) => setPosSearch(e.target.value)} style={{ ...inputStyle, marginBottom: 12 }} />
             <div style={{ display: "flex", gap: 8, overflowX: "auto", marginBottom: 14, paddingBottom: 4 }}>
@@ -1677,17 +1884,12 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
             </div>
           </div>
 
-          {/* RIGHT: cart */}
-          <div className="card" style={{ padding: 16, borderRadius: 16, position: isMobile ? "static" : "sticky", top: 16 }}>
+          {/* RIGHT: cart on top, table / quick-order picker below it */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 18, position: isMobile ? "static" : "sticky", top: 16 }}>
+          <div className="card" style={{ padding: 16, borderRadius: 16 }}>
             <h3 style={{ fontSize: 14.5, fontWeight: 800, marginBottom: 10 }}>
               {posOrderType === "takeaway" ? "📦 Takeaway Order" : posTable ? `Table ${posTable}` : "Select a table"}
             </h3>
-            {posOrderType !== "takeaway" && (
-              <select value={posTable || ""} onChange={(e) => setPosTable(e.target.value ? parseInt(e.target.value, 10) : null)} style={{ ...inputStyle, marginBottom: 14 }}>
-                <option value="">Select table</option>
-                {tables.map((t) => <option key={t.id} value={t.number}>Table {t.number}</option>)}
-              </select>
-            )}
             {posLines.length === 0 ? (
               <p style={{ color: "#999", fontSize: 13 }}>Cart is empty.</p>
             ) : (
@@ -1713,6 +1915,28 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
             </div>
             <input placeholder="Order notes (optional)" value={posNotes} onChange={(e) => setPosNotes(e.target.value)} style={inputStyle} />
             <button className="btn btn-primary" style={{ width: "100%" }} disabled={posSending} onClick={posSendToKitchen}>{posSending ? "Sending..." : "Send to Kitchen"}</button>
+          </div>
+
+          <div className="card" style={{ padding: 16, borderRadius: 16 }}>
+            <button
+              onClick={() => { setPosOrderType(posOrderType === "takeaway" ? "dinein" : "takeaway"); setPosTable(null); }}
+              className="btn"
+              style={{ width: "100%", marginBottom: 14, background: posOrderType === "takeaway" ? "#8b5cf6" : "var(--surface-2, #f3efe6)", color: posOrderType === "takeaway" ? "#fff" : "#555" }}
+            >📦 {posOrderType === "takeaway" ? "Quick Order Active" : "Quick Order (Takeaway)"}</button>
+            <div style={{ fontSize: 11.5, fontWeight: 800, color: "#888", textTransform: "uppercase", marginBottom: 8 }}>Tables</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, maxHeight: 300, overflowY: "auto" }}>
+              {tables.map((t) => {
+                const activeCount = orders.filter((o) => o.table === t.number && !["paid", "cancelled", "declined", "merged"].includes(o.status)).length;
+                const isSelected = posOrderType === "dinein" && posTable === t.number;
+                return (
+                  <button key={t.id} onClick={() => { setPosOrderType("dinein"); setPosTable(t.number); }}
+                    style={{ padding: "10px 4px", borderRadius: 10, border: isSelected ? "2px solid #1a1a2e" : "2px solid transparent", background: activeCount > 0 ? "#fee2e2" : "#dcfce7", color: activeCount > 0 ? "#991b1b" : "#166534", fontWeight: 800, fontSize: 13, cursor: "pointer" }}>
+                    {t.number}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
           </div>
         </div>
 
@@ -1887,33 +2111,63 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
         <div className="card" style={{ padding: 24, borderRadius: 16, marginBottom: 24, border: "2px dashed #1a1a2e" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
             <h3 style={{ fontSize: 16, fontWeight: 800, margin: 0 }}>Import Menu</h3>
-            <button onClick={() => { setShowImportModal(false); setImportText(""); setImportPreview(null); }} style={{ background: "none", border: "none", color: "#888", cursor: "pointer", fontSize: 18 }}>✕</button>
+            <button onClick={() => { setShowImportModal(false); setImportText(""); setImportPreview(null); setZipFile(null); setZipImages({}); setImportReport(null); }} style={{ background: "none", border: "none", color: "#888", cursor: "pointer", fontSize: 18 }}>✕</button>
           </div>
 
-          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-            <button onClick={() => setImportFormat("csv")} style={{ padding: "6px 14px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 700, cursor: "pointer", background: importFormat === "csv" ? "#1a1a2e" : "#f3efe6", color: importFormat === "csv" ? "#fff" : "#666" }}>CSV</button>
-            <button onClick={() => setImportFormat("json")} style={{ padding: "6px 14px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 700, cursor: "pointer", background: importFormat === "json" ? "#1a1a2e" : "#f3efe6", color: importFormat === "json" ? "#fff" : "#666" }}>JSON</button>
-            <button onClick={downloadTemplate} className="btn btn-sm btn-ghost" style={{ marginLeft: "auto" }}>↓ Download Template</button>
+          {importReport && (
+            <div style={{ fontSize: 13, display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
+              <span>✅ {importReport.imported} item(s) imported</span>
+              {importReport.imagesUploaded > 0 && <span>✅ {importReport.imagesUploaded} image(s) uploaded to Cloudinary</span>}
+              {importReport.categoriesCreated > 0 && <span>✅ {importReport.categoriesCreated} new categor{importReport.categoriesCreated === 1 ? "y" : "ies"} created</span>}
+              {importReport.imagesMissing > 0 && <span style={{ color: "#e8a33d" }}>⚠️ {importReport.imagesMissing} image(s) not found in the zip — imported without a photo</span>}
+              {importReport.imagesFailed > 0 && <span style={{ color: "#e8a33d" }}>⚠️ {importReport.imagesFailed} image upload(s) failed — imported without a photo</span>}
+              {importReport.duplicatesSkipped > 0 && <span style={{ color: "#888" }}>ℹ️ {importReport.duplicatesSkipped} duplicate(s) skipped</span>}
+              {importReport.invalidRows > 0 && <span style={{ color: "#dc2626" }}>❌ {importReport.invalidRows} row(s) had errors and were skipped</span>}
+              <button className="btn btn-primary btn-sm" style={{ marginTop: 6, alignSelf: "flex-start" }} onClick={() => setImportReport(null)}>Import Another File</button>
+            </div>
+          )}
+
+          {!importReport && (
+          <>
+          <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+            <button onClick={() => { setImportFormat("csv"); setImportPreview(null); }} style={{ padding: "6px 14px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 700, cursor: "pointer", background: importFormat === "csv" ? "#1a1a2e" : "#f3efe6", color: importFormat === "csv" ? "#fff" : "#666" }}>CSV</button>
+            <button onClick={() => { setImportFormat("json"); setImportPreview(null); }} style={{ padding: "6px 14px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 700, cursor: "pointer", background: importFormat === "json" ? "#1a1a2e" : "#f3efe6", color: importFormat === "json" ? "#fff" : "#666" }}>JSON</button>
+            <button onClick={() => { setImportFormat("zip"); setImportPreview(null); }} style={{ padding: "6px 14px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 700, cursor: "pointer", background: importFormat === "zip" ? "#1a1a2e" : "#f3efe6", color: importFormat === "zip" ? "#fff" : "#666" }}>ZIP (CSV + Photos)</button>
+            {importFormat === "zip"
+              ? <button onClick={downloadZipTemplate} className="btn btn-sm btn-ghost" style={{ marginLeft: "auto" }}>↓ Download ZIP Template</button>
+              : <button onClick={downloadTemplate} className="btn btn-sm btn-ghost" style={{ marginLeft: "auto" }}>↓ Download Template</button>}
           </div>
 
           <p style={{ fontSize: 12.5, color: "#6b6b7b", marginBottom: 12 }}>
             {importFormat === "csv"
               ? "Paste CSV text below. Columns: Name, Price, Category, Description, FoodType, ChefSpecial, Featured, ImageUrl"
-              : "Paste JSON array below. Each object needs: name, price, category. Optional: description, foodType, chefSpecial, featured, imageUrl"}
+              : importFormat === "json"
+              ? "Paste JSON array below. Each object needs: name, price, category. Optional: description, foodType, chefSpecial, featured, imageUrl"
+              : "Upload a .zip containing one menu.csv (with an ImageFile column, e.g. paneer-tikka.jpg) and an images/ folder with matching photos. Photos are uploaded to Cloudinary automatically."}
           </p>
 
-          <textarea
-            value={importText}
-            onChange={(e) => { setImportText(e.target.value); setImportPreview(null); }}
-            placeholder={importFormat === "csv"
-              ? `Name,Price,Category,Description,FoodType,ChefSpecial,Featured,ImageUrl\nPaneer Tikka,320,Starters,Marinated cottage cheese,veg,no,no,`
-              : `[\n  {\n    "name": "Paneer Tikka",\n    "price": 320,\n    "category": "Starters",\n    "description": "Marinated cottage cheese",\n    "foodType": "veg",\n    "chefSpecial": false,\n    "featured": false\n  }\n]`}
-            style={{ width: "100%", minHeight: 160, padding: 14, borderRadius: 10, border: "1px solid #e6e1d6", fontSize: 13, fontFamily: "monospace", resize: "vertical", marginBottom: 12, boxSizing: "border-box" }}
-          />
+          {importFormat === "zip" ? (
+            <div style={{ marginBottom: 16 }}>
+              <input type="file" accept=".zip" onChange={(e) => handleZipFileSelected(e.target.files[0])} style={{ fontSize: 13, marginBottom: 10 }} />
+              {zipParsing && <p style={{ fontSize: 13, color: "#888" }}>Reading zip file…</p>}
+              {zipFile && !zipParsing && !importPreview?.error && <p style={{ fontSize: 12.5, color: "#16a34a", fontWeight: 600 }}>Loaded {zipFile.name}</p>}
+            </div>
+          ) : (
+            <>
+              <textarea
+                value={importText}
+                onChange={(e) => { setImportText(e.target.value); setImportPreview(null); }}
+                placeholder={importFormat === "csv"
+                  ? `Name,Price,Category,Description,FoodType,ChefSpecial,Featured,ImageUrl\nPaneer Tikka,320,Starters,Marinated cottage cheese,veg,no,no,`
+                  : `[\n  {\n    "name": "Paneer Tikka",\n    "price": 320,\n    "category": "Starters",\n    "description": "Marinated cottage cheese",\n    "foodType": "veg",\n    "chefSpecial": false,\n    "featured": false\n  }\n]`}
+                style={{ width: "100%", minHeight: 160, padding: 14, borderRadius: 10, border: "1px solid #e6e1d6", fontSize: 13, fontFamily: "monospace", resize: "vertical", marginBottom: 12, boxSizing: "border-box" }}
+              />
 
-          <button onClick={buildImportPreview} className="btn btn-primary" style={{ marginBottom: 16 }} disabled={!importText.trim()}>
-            Preview Import
-          </button>
+              <button onClick={buildImportPreview} className="btn btn-primary" style={{ marginBottom: 16 }} disabled={!importText.trim()}>
+                Preview Import
+              </button>
+            </>
+          )}
 
           {importPreview && (
             <div style={{ marginBottom: 16 }}>
@@ -1963,6 +2217,13 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                     </div>
                   )}
 
+                  {importPreview.isZip && (
+                    <div style={{ display: "flex", gap: 16, marginBottom: 12, flexWrap: "wrap", fontSize: 13 }}>
+                      <span><span style={{ color: "#16a34a", fontWeight: 700 }}>{importPreview.imageStats.matched}</span> photos matched</span>
+                      {importPreview.imageStats.missing > 0 && <span><span style={{ color: "#dc2626", fontWeight: 700 }}>{importPreview.imageStats.missing}</span> missing (will import without photo)</span>}
+                    </div>
+                  )}
+
                   <div className="card" style={{ padding: 16, borderRadius: 12, marginBottom: 12, maxHeight: 240, overflow: "auto" }}>
                     <table style={{ width: "100%", fontSize: 12.5, borderCollapse: "collapse" }}>
                       <thead>
@@ -1972,6 +2233,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                           <th style={{ padding: "6px 8px" }}>Category</th>
                           <th style={{ padding: "6px 8px" }}>Type</th>
                           <th style={{ padding: "6px 8px" }}>Flags</th>
+                          {importPreview.isZip && <th style={{ padding: "6px 8px" }}>Photo</th>}
                         </tr>
                       </thead>
                       <tbody>
@@ -1987,6 +2249,13 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                               {item.chefSpecial && <span style={{ fontSize: 10, background: "#1a1a2e", color: "#fff", padding: "2px 6px", borderRadius: 4, marginRight: 4 }}>CS</span>}
                               {item.featured && <span style={{ fontSize: 10, background: "#e8a33d", color: "#fff", padding: "2px 6px", borderRadius: 4 }}>★</span>}
                             </td>
+                            {importPreview.isZip && (
+                              <td style={{ padding: "6px 8px" }}>
+                                {item.imageMatchStatus === "matched" && <span style={{ color: "#16a34a" }}>✅ Matched</span>}
+                                {item.imageMatchStatus === "missing" && <span style={{ color: "#dc2626" }}>⚠️ Missing</span>}
+                                {item.imageMatchStatus === "none" && <span style={{ color: "#999" }}>—</span>}
+                              </td>
+                            )}
                           </tr>
                         ))}
                       </tbody>
@@ -2002,11 +2271,15 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                     className="btn btn-primary"
                     style={{ width: "100%", opacity: importing || (importPreview.categoriesNeeded.length > 0 && !autoCreateCategories) ? 0.5 : 1 }}
                   >
-                    {importing ? "Importing..." : `Import ${importPreview.items.length - importPreview.duplicates.length} Items`}
+                    {importing
+                      ? (importPreview.isZip && importProgress.total > 0 ? `Uploading photos... ${importProgress.done}/${importProgress.total}` : "Importing...")
+                      : `Import ${importPreview.items.length - importPreview.duplicates.length} Items`}
                   </button>
                 </>
               )}
             </div>
+          )}
+          </>
           )}
         </div>
       )}
