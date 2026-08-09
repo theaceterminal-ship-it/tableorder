@@ -1,25 +1,19 @@
 "use client";
 // FINAL REDESIGN — table-side customer menu, matching the Oak Restro reference layout.
 //
-// Changes vs the previous version:
-// 1. Header rebuilt to match reference: Call Waiter icon (top-left, replaces the
-//    hamburger slot) + logo/name/tagline, "Table N" pill (top-right, replaces the
-//    bell slot) — still NO hamburger menu and NO notification bell, per spec.
-//    Order-status is still handled entirely by the bottom cart/status bar.
-// 2. NEW: Call Waiter — bottom-sheet with preset reasons (Water, Tissues, Cutlery,
-//    Seasoning, Something else) that writes to `restaurants/{id}/waiterCalls`.
-// 3. NEW: Spotlight card — a single large "Most Loved / Most Ordered / Most Rated"
-//    feature card sits between the category pills and Popular Picks. Which metric
-//    it spotlights is configurable by the receptionist (info/settings.spotlightMetric),
-//    matching the "one more threshold" ask.
-// 4. "What are you craving" chip row + Bestseller dropdown: REMOVED (per spec).
-// 5. Explore filter: added a "Most Rated" option alongside Most Loved / Most Ordered.
-// 6. NEW: Dine-in / Takeaway toggle in the cart summary sheet — stored as
-//    `order.orderType`. (Kitchen-side "PACK FOR TAKEAWAY" ticket badge is an
-//    admin-side change, coming in the next phase along with POS + Bar.)
-// 7. Hero banner stays image-only, full width, carousel — no text overlay, per spec.
-// 8. Category pills, ratings, recommendation banners, promo banner placement,
-//    Google-review thank-you flow: unchanged from the last pass.
+// UPDATE (this pass):
+// 1. "Customise this item" is now a clearly-visible pill button (was a faint
+//    underlined link tucked right under the description).
+// 2. NEW: every cart line now has its own "Customise this item" link. Tapping
+//    it reopens the item modal pre-filled with that line's current spice
+//    level / notes and SAVES BACK onto that same line (no duplicate line).
+// 3. "People also ordered" rebuilt as two full image cards (max 2 items).
+// 4. "Complete your meal" rebuilt as one attractive image card instead of a
+//    thin text row.
+// 5. Call Waiter button now has a tiny "Call Staff" caption under it.
+//
+// Everything else (hero carousel, spotlight card, category pills, promo
+// banner, Google-review flow, dine-in/takeaway, bill flow) is UNCHANGED.
 //
 // Firestore fields this page expects to exist (maintained elsewhere — reception
 // dashboard / a future aggregation job, not by this file):
@@ -263,10 +257,14 @@ function SpotlightCard({ item, metric, onAdd }) {
   );
 }
 
-function ItemDetailModal({ item, onClose, onAdd }) {
-  const [mode, setMode] = useState("view");
-  const [notes, setNotes] = useState("");
-  const [spiceLevel, setSpiceLevel] = useState(null);
+// Item detail / customization modal.
+// NEW: startMode / initialNotes / initialSpiceLevel let this modal be reopened
+// from a CART LINE for editing — the parent decides (via `onAdd`) whether this
+// call means "add a new line" or "update the line I was already editing".
+function ItemDetailModal({ item, onClose, onAdd, startMode = "view", initialNotes = "", initialSpiceLevel = null }) {
+  const [mode, setMode] = useState(startMode);
+  const [notes, setNotes] = useState(initialNotes);
+  const [spiceLevel, setSpiceLevel] = useState(initialSpiceLevel);
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 250, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
@@ -290,9 +288,9 @@ function ItemDetailModal({ item, onClose, onAdd }) {
 
         {mode === "view" && (
           <>
-            <p style={{ fontSize: 14, color: "#555", lineHeight: 1.5, marginTop: 12 }}>{item.description || "No description available."}</p>
-            <button onClick={() => setMode("customize")} style={{ background: "none", border: "none", color: "#999", fontSize: 12, textDecoration: "underline", cursor: "pointer", padding: 0, marginTop: 6, marginBottom: 20, display: "block" }}>
-              Customise this item
+            <p style={{ fontSize: 14, color: "#555", lineHeight: 1.5, marginTop: 12, marginBottom: 14 }}>{item.description || "No description available."}</p>
+            <button onClick={() => setMode("customize")} className="tap-btn" style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#fff5e0", border: "1px solid #fde68a", color: "#92400e", fontSize: 12.5, fontWeight: 700, padding: "8px 14px", borderRadius: 100, cursor: "pointer", marginBottom: 20 }}>
+              ✎ Customise this item
             </button>
             <button onClick={() => { onAdd(item.id, 1, null); onClose(); }} style={{ width: "100%", padding: 14, borderRadius: 14, border: "none", background: "#1a1a2e", color: "#fff", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
               + Add to Cart
@@ -316,7 +314,7 @@ function ItemDetailModal({ item, onClose, onAdd }) {
             <div style={{ display: "flex", gap: 10 }}>
               <button onClick={() => setMode("view")} style={{ flex: 1, padding: 14, borderRadius: 14, border: "1px solid #ddd", background: "#fff", fontWeight: 600, cursor: "pointer" }}>Back</button>
               <button onClick={() => { onAdd(item.id, 1, { notes, spiceLevel }); onClose(); }} style={{ flex: 2, padding: 14, borderRadius: 14, border: "none", background: "#e8a33d", color: "#1a1a2e", fontWeight: 700, cursor: "pointer" }}>
-                Add Customised Item
+                {startMode === "customize" ? "Save Changes" : "Add Customised Item"}
               </button>
             </div>
           </div>
@@ -488,8 +486,12 @@ function StatusToast({ emoji, msg }) {
 }
 
 // ---------------------------------------------------------------------------
-// Recommendation banners (unchanged logic from the previous pass)
+// Recommendation banners — REDESIGNED: real photo cards, not text rows.
 // ---------------------------------------------------------------------------
+
+// "People also ordered" — exactly 2 items, each a full mini product card
+// (photo, name, price, + button) so it's an attractive tap target, not a
+// skinny scroll strip.
 function PeopleAlsoOrderedBanner({ cart, menuItems, onAdd, compact }) {
   const cartItemIds = new Set(Object.values(cart).map((l) => l.itemId));
   const cartCategories = new Set();
@@ -498,29 +500,43 @@ function PeopleAlsoOrderedBanner({ cart, menuItems, onAdd, compact }) {
     if (item) cartCategories.add(item.category);
   });
 
-  const suggestions = menuItems.filter((m) => {
-    if (cartItemIds.has(m.id)) return false;
-    if (!m.available) return false;
-    return cartCategories.has(m.category) || (m.featured && Math.random() > 0.5);
-  }).slice(0, 3);
+  const suggestions = menuItems
+    .filter((m) => {
+      if (cartItemIds.has(m.id)) return false;
+      if (!m.available) return false;
+      return cartCategories.has(m.category) || m.featured;
+    })
+    .slice(0, 2);
 
   if (suggestions.length === 0) return null;
 
   return (
-    <div className="rec-banner" style={{ margin: compact ? "0 0 12px" : "0 20px 20px", background: "linear-gradient(135deg, #fef3c7 0%, #fff5e0 100%)", borderRadius: compact ? 12 : 16, padding: compact ? 12 : 16, border: "1px solid #fde68a" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: compact ? 8 : 10 }}>
-        <span style={{ fontSize: compact ? 14 : 16 }}>👥</span>
-        <span style={{ fontSize: compact ? 12 : 13, fontWeight: 800, color: "#92400e" }}>People also ordered these</span>
+    <div className="rec-banner" style={{ margin: compact ? "0 0 16px" : "0 20px 20px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
+        <span style={{ fontSize: 15 }}>👥</span>
+        <span style={{ fontSize: 13, fontWeight: 800, color: "#1a1a2e" }}>People also ordered</span>
       </div>
-      <div style={{ display: "flex", gap: 8, overflowX: "auto" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
         {suggestions.map((item) => (
-          <div key={item.id} onClick={() => onAdd(item.id, 1)} className="tap-btn" style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 8, background: "#fff", borderRadius: 10, padding: compact ? "6px 10px" : "8px 12px", border: "1px solid #f0f0f0", cursor: "pointer", minWidth: compact ? 150 : 180 }}>
-            {item.imageUrl && <img src={item.imageUrl} alt="" style={{ width: compact ? 32 : 40, height: compact ? 32 : 40, borderRadius: 8, objectFit: "cover" }} />}
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: compact ? 11 : 12, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.name}</div>
-              <div style={{ fontSize: compact ? 10 : 11, color: "#e8a33d", fontWeight: 700 }}>₹{item.price}</div>
+          <div key={item.id} style={{ background: "#fff", borderRadius: 14, overflow: "hidden", border: "1px solid #f0ebe3", boxShadow: "0 2px 10px rgba(0,0,0,0.05)" }}>
+            <div style={{ position: "relative", height: 78, background: "#f8f6f3" }}>
+              {item.imageUrl ? (
+                <img src={item.imageUrl} alt={item.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              ) : (
+                <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26 }}>🍽️</div>
+              )}
+              <button
+                onClick={() => { playTone(680, 90, "triangle"); onAdd(item.id, 1); }}
+                className="tap-btn"
+                style={{ position: "absolute", bottom: -14, right: 8, width: 30, height: 30, borderRadius: "50%", border: "none", background: "#e8a33d", color: "#1a1a2e", fontSize: 17, fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px rgba(232,163,61,0.4)" }}
+              >
+                +
+              </button>
             </div>
-            <span style={{ background: "#e8a33d", color: "#1a1a2e", fontSize: compact ? 14 : 16, fontWeight: 700, width: compact ? 24 : 28, height: compact ? 24 : 28, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>+</span>
+            <div style={{ padding: "18px 10px 10px" }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#1a1a2e", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.name}</div>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: "#e8a33d", marginTop: 2 }}>₹{item.price}</div>
+            </div>
           </div>
         ))}
       </div>
@@ -528,6 +544,7 @@ function PeopleAlsoOrderedBanner({ cart, menuItems, onAdd, compact }) {
   );
 }
 
+// "Complete your meal" — one attractive photo card instead of a thin text row.
 function CompleteMealBanner({ cart, menuItems, onAdd, compact }) {
   const cartItemIds = new Set(Object.values(cart).map((l) => l.itemId));
   const cartItems = menuItems.filter((m) => cartItemIds.has(m.id));
@@ -550,17 +567,29 @@ function CompleteMealBanner({ cart, menuItems, onAdd, compact }) {
   if (!suggestion) return null;
 
   return (
-    <div className="rec-banner" style={{ margin: compact ? "0 0 12px" : "0 20px 20px", background: "linear-gradient(135deg, #dcfce7 0%, #f0fdf4 100%)", borderRadius: compact ? 12 : 16, padding: compact ? 12 : 16, border: "1px solid #bbf7d0" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: compact ? 8 : 10, flex: 1, minWidth: 0 }}>
-          {suggestion.imageUrl && <img src={suggestion.imageUrl} alt="" style={{ width: compact ? 38 : 48, height: compact ? 38 : 48, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />}
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: compact ? 11 : 12, fontWeight: 800, color: "#166534" }}>🍽️ Complete your meal</div>
-            <div style={{ fontSize: compact ? 12 : 13, fontWeight: 600, color: "#1a1a2e", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{suggestion.name} — ₹{suggestion.price}</div>
-            {!compact && <div style={{ fontSize: 11, color: "#888" }}>Pairs perfectly with what you ordered</div>}
-          </div>
+    <div className="rec-banner" style={{ margin: compact ? "0 0 16px" : "0 20px 20px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
+        <span style={{ fontSize: 15 }}>🍽️</span>
+        <span style={{ fontSize: 13, fontWeight: 800, color: "#166534" }}>Complete your meal</span>
+      </div>
+      <div style={{ background: "#fff", borderRadius: 14, overflow: "hidden", border: "1px solid #bbf7d0", boxShadow: "0 2px 10px rgba(0,0,0,0.05)", display: "flex", alignItems: "center", gap: 12, padding: 10 }}>
+        <div style={{ width: 64, height: 64, borderRadius: 12, overflow: "hidden", flexShrink: 0, background: "#f0fdf4" }}>
+          {suggestion.imageUrl ? (
+            <img src={suggestion.imageUrl} alt={suggestion.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          ) : (
+            <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>🍽️</div>
+          )}
         </div>
-        <button onClick={() => onAdd(suggestion.id, 1)} className="tap-btn" style={{ padding: compact ? "6px 12px" : "8px 16px", borderRadius: 10, border: "none", background: "#16a34a", color: "#fff", fontWeight: 700, fontSize: compact ? 12 : 13, cursor: "pointer", flexShrink: 0 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#1a1a2e", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{suggestion.name}</div>
+          <div style={{ fontSize: 11, color: "#888" }}>Pairs perfectly with your order</div>
+          <div style={{ fontSize: 13, fontWeight: 800, color: "#16a34a", marginTop: 2 }}>₹{suggestion.price}</div>
+        </div>
+        <button
+          onClick={() => { playTone(680, 90, "triangle"); onAdd(suggestion.id, 1); }}
+          className="tap-btn"
+          style={{ padding: "8px 16px", borderRadius: 10, border: "none", background: "#16a34a", color: "#fff", fontWeight: 800, fontSize: 12.5, cursor: "pointer", flexShrink: 0 }}
+        >
           + Add
         </button>
       </div>
@@ -632,6 +661,9 @@ function TableContent() {
   const [showSplash, setShowSplash] = useState(true);
   const [splashLeaving, setSplashLeaving] = useState(false);
   const [detailItem, setDetailItem] = useState(null);
+  // NEW: when set, the ItemDetailModal is editing THIS cart line instead of
+  // adding a brand-new one. Set by openLineCustomize(), cleared on close.
+  const [editingLineId, setEditingLineId] = useState(null);
   const [ratingOrder, setRatingOrder] = useState(null);
   const [vegFilter, setVegFilter] = useState("all");
   const [promoBanner, setPromoBanner] = useState(null);
@@ -842,6 +874,48 @@ function TableContent() {
 
   function findItem(id) { return menuItems.find((m) => m.id === id); }
 
+  // Opens the detail modal for "view / add new" — always clears any pending
+  // cart-line-edit state so a fresh menu-card tap never gets mistaken for an
+  // in-progress cart customization.
+  function openItemDetail(item) {
+    setEditingLineId(null);
+    setDetailItem(item);
+  }
+
+  // NEW: opens the same modal, but pre-loaded with a specific cart line's
+  // current customization, and flagged so the Save button updates that line
+  // instead of adding a duplicate.
+  function openLineCustomize(lineId) {
+    const line = cart[lineId];
+    if (!line) return;
+    const item = findItem(line.itemId);
+    if (!item) return;
+    setEditingLineId(lineId);
+    setDetailItem(item);
+  }
+
+  function closeDetailModal() {
+    setDetailItem(null);
+    setEditingLineId(null);
+  }
+
+  // Routes the modal's "Add" action: if we opened it to edit an existing cart
+  // line, update that line in place; otherwise fall through to the normal
+  // add-to-cart behaviour.
+  function handleDetailAdd(itemId, qty, customization) {
+    if (editingLineId) {
+      const lineId = editingLineId;
+      setCart((prev) => {
+        const line = prev[lineId];
+        if (!line) return prev;
+        return { ...prev, [lineId]: { ...line, notes: customization?.notes || "", spiceLevel: customization?.spiceLevel || null } };
+      });
+      setEditingLineId(null);
+    } else {
+      addToCart(itemId, qty, customization);
+    }
+  }
+
   function addToCart(itemId, qty, customization = null) {
     setCart((prev) => {
       if (!customization) {
@@ -1042,6 +1116,13 @@ function TableContent() {
                   <div style={{ fontSize: 13, color: "#888" }}>₹{item.price} × {line.qty}</div>
                   {line.spiceLevel && <div style={{ fontSize: 11, color: "#e8a33d", marginTop: 2 }}>🌶 {line.spiceLevel}</div>}
                   {line.notes && <div style={{ fontSize: 11, color: "#888", fontStyle: "italic", marginTop: 2 }}>"{line.notes}"</div>}
+                  <button
+                    onClick={() => openLineCustomize(lineId)}
+                    className="tap-btn"
+                    style={{ background: "none", border: "none", color: "#e8a33d", fontSize: 11, fontWeight: 700, textDecoration: "underline", cursor: "pointer", padding: 0, marginTop: 4, display: "block" }}
+                  >
+                    ✎ Customise this item
+                  </button>
                 </div>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -1285,7 +1366,16 @@ function TableContent() {
     return (
       <div style={{ minHeight: "100vh", background: "#fff", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", paddingBottom: 100 }}>
         {successOverlay && <SuccessOverlay message={successOverlay} />}
-        {detailItem && <ItemDetailModal item={detailItem} onClose={() => setDetailItem(null)} onAdd={addToCart} />}
+        {detailItem && (
+          <ItemDetailModal
+            item={detailItem}
+            onClose={closeDetailModal}
+            onAdd={handleDetailAdd}
+            startMode={editingLineId ? "customize" : "view"}
+            initialNotes={editingLineId ? (cart[editingLineId]?.notes || "") : ""}
+            initialSpiceLevel={editingLineId ? (cart[editingLineId]?.spiceLevel || null) : null}
+          />
+        )}
         <div style={{ position: "sticky", top: 0, zIndex: 10, background: "#fff", borderBottom: "1px solid #f0f0f0" }}>
           <div style={{ maxWidth: 480, margin: "0 auto", padding: "16px 20px", display: "flex", alignItems: "center", gap: 14 }}>
             <button onClick={() => { playTone(440, 70); setScreen("menu"); }} className="tap-btn" style={{ width: 36, height: 36, borderRadius: "50%", border: "1px solid #eee", background: "#fff", fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "#1a1a2e", flexShrink: 0 }} aria-label="Back">←</button>
@@ -1297,7 +1387,7 @@ function TableContent() {
             <div style={{ textAlign: "center", padding: 40, color: "#888" }}><div style={{ fontSize: 40, marginBottom: 12 }}>🍽️</div><p>No items on the menu yet.</p></div>
           ) : (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 16 }}>
-              {availableItems.map((it) => (<MenuCard key={it.id} item={it} qty={qtyForItem(it.id)} onAdd={() => addToCart(it.id, 1)} onOpenDetail={setDetailItem} />))}
+              {availableItems.map((it) => (<MenuCard key={it.id} item={it} qty={qtyForItem(it.id)} onAdd={() => addToCart(it.id, 1)} onOpenDetail={openItemDetail} />))}
             </div>
           )}
         </div>
@@ -1312,7 +1402,16 @@ function TableContent() {
     <div style={{ minHeight: "100vh", background: "#fff", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", paddingBottom: 100 }}>
       <style jsx>{` .hscroll::-webkit-scrollbar { display: none; } `}</style>
       {successOverlay && <SuccessOverlay message={successOverlay} />}
-      {detailItem && <ItemDetailModal item={detailItem} onClose={() => setDetailItem(null)} onAdd={addToCart} />}
+      {detailItem && (
+        <ItemDetailModal
+          item={detailItem}
+          onClose={closeDetailModal}
+          onAdd={handleDetailAdd}
+          startMode={editingLineId ? "customize" : "view"}
+          initialNotes={editingLineId ? (cart[editingLineId]?.notes || "") : ""}
+          initialSpiceLevel={editingLineId ? (cart[editingLineId]?.spiceLevel || null) : null}
+        />
+      )}
       {ratingOrder && <RatingPopup order={ratingOrder} restaurantId={restaurantId} onDone={() => setRatingOrder(null)} googleReviewLink={googleReviewLink} />}
       {showWaiterModal && <WaiterModal onClose={() => setShowWaiterModal(false)} onSend={callWaiter} />}
 
@@ -1321,10 +1420,13 @@ function TableContent() {
         <div style={{ maxWidth: 480, margin: "0 auto", padding: "16px 20px 14px" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 10 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-              <button onClick={() => { playTone(500, 60); setShowWaiterModal(true); }} className="tap-btn" aria-label="Call Waiter"
-                style={{ width: 38, height: 38, borderRadius: "50%", border: "none", background: "#1a1a2e", color: "#fff", fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, boxShadow: "0 2px 8px rgba(26,26,46,0.25)" }}>
-                🛎️
-              </button>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, flexShrink: 0 }}>
+                <button onClick={() => { playTone(500, 60); setShowWaiterModal(true); }} className="tap-btn" aria-label="Call Waiter"
+                  style={{ width: 38, height: 38, borderRadius: "50%", border: "none", background: "#1a1a2e", color: "#fff", fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px rgba(26,26,46,0.25)" }}>
+                  🛎️
+                </button>
+                <span style={{ fontSize: 8.5, fontWeight: 700, color: "#a08a5c", whiteSpace: "nowrap", letterSpacing: 0.2 }}>Call Staff</span>
+              </div>
               {profile?.logoUrl ? (
                 <img src={profile.logoUrl} alt="logo" style={{ width: 40, height: 40, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />
               ) : (
@@ -1383,7 +1485,7 @@ function TableContent() {
               <div style={{ textAlign: "center", padding: 40, color: "#888" }}><div style={{ fontSize: 40, marginBottom: 12 }}>🔍</div><p>No dishes match your search.</p></div>
             ) : (
               <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 16 }}>
-                {searchResults.map((it) => (<MenuCard key={it.id} item={it} qty={qtyForItem(it.id)} onAdd={() => addToCart(it.id, 1)} onOpenDetail={setDetailItem} />))}
+                {searchResults.map((it) => (<MenuCard key={it.id} item={it} qty={qtyForItem(it.id)} onAdd={() => addToCart(it.id, 1)} onOpenDetail={openItemDetail} />))}
               </div>
             )}
           </div>
@@ -1448,11 +1550,11 @@ function TableContent() {
 
               {activeCategory === "All" ? (
                 <div className="hscroll" style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 8, scrollbarWidth: "none" }}>
-                  {filteredItems.slice(0, POPULAR_LIMIT).map((it) => (<MenuCard key={it.id} item={it} qty={qtyForItem(it.id)} onAdd={() => addToCart(it.id, 1)} onOpenDetail={setDetailItem} width={132} />))}
+                  {filteredItems.slice(0, POPULAR_LIMIT).map((it) => (<MenuCard key={it.id} item={it} qty={qtyForItem(it.id)} onAdd={() => addToCart(it.id, 1)} onOpenDetail={openItemDetail} width={132} />))}
                 </div>
               ) : (
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 16 }}>
-                  {filteredItems.map((it) => (<MenuCard key={it.id} item={it} qty={qtyForItem(it.id)} onAdd={() => addToCart(it.id, 1)} onOpenDetail={setDetailItem} />))}
+                  {filteredItems.map((it) => (<MenuCard key={it.id} item={it} qty={qtyForItem(it.id)} onAdd={() => addToCart(it.id, 1)} onOpenDetail={openItemDetail} />))}
                 </div>
               )}
             </div>
@@ -1505,7 +1607,7 @@ function TableContent() {
                 <div style={{ textAlign: "center", padding: 40, color: "#888" }}><div style={{ fontSize: 40, marginBottom: 12 }}>🍽️</div><p>No items match this filter.</p></div>
               ) : (
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 16 }}>
-                  {exploreItems.map((it) => (<MenuCard key={it.id} item={it} qty={qtyForItem(it.id)} onAdd={() => addToCart(it.id, 1)} onOpenDetail={setDetailItem} />))}
+                  {exploreItems.map((it) => (<MenuCard key={it.id} item={it} qty={qtyForItem(it.id)} onAdd={() => addToCart(it.id, 1)} onOpenDetail={openItemDetail} />))}
                 </div>
               )}
             </div>
