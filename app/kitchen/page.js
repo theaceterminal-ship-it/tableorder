@@ -1,8 +1,16 @@
 "use client";
 // REPLACES your existing app/kitchen/page.js entirely.
-// Changes vs your original:
+// Changes vs your previous version:
 // 1. VIP orders sort to the top of each column (confirmed/preparing/ready).
 // 2. Each item row shows spice level + special-request notes if present.
+// 3. Start Cooking / Mark Ready buttons now have real, self-contained CSS
+//    (no dependency on a global .btn class existing anywhere else).
+// 4. Default cooking timer is 20 minutes, plus quick preset buttons
+//    (10/15/20/25/30) that start cooking with one tap.
+// 5. The moment an order becomes "confirmed" (i.e. the receptionist just
+//    confirmed it), this page automatically prints a Kitchen Order Ticket
+//    (KOT) to whatever printer is set up on this device — see the
+//    printKitchenTicket() function and the NOTE below it.
 
 import { useEffect, useState, useRef } from "react";
 import { db } from "@/lib/firebase";
@@ -79,6 +87,117 @@ function getElapsed(o) {
   return `${m}m ${s.toString().padStart(2, "0")}s`;
 }
 
+function escapeHtml(str) {
+  return String(str ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// ---------------------------------------------------------------------------
+// Kitchen Order Ticket (KOT) auto-print
+// ---------------------------------------------------------------------------
+// This builds a small 80mm-wide printable HTML ticket in a hidden iframe and
+// calls window.print() on it. Most thermal receipt printers (Epson TM-series,
+// Xprinter, etc.) install as a normal OS printer via USB/Ethernet/Bluetooth,
+// so as long as that printer is set as the DEFAULT PRINTER on this kitchen
+// device, the browser print dialog will default to it — hit Enter/Print and
+// it comes out the thermal printer.
+//
+// NOTE — true "silent" printing (no dialog at all) is NOT possible from a
+// plain web page for security reasons. Two ways to get a fully silent,
+// zero-click print:
+//   1. Run Chrome/Edge on the kitchen device with the --kiosk-printing flag
+//      (or as a kiosk-mode PWA) — this skips the dialog and prints straight
+//      to the default printer.
+//   2. Use a local print bridge like QZ Tray or a small Node/ESC-POS service
+//      running on the kitchen PC, and POST the ticket data to it instead of
+//      calling window.print(). That gives you raw ESC/POS control (auto-cut,
+//      cash-drawer kick, etc.) but needs that extra local service installed.
+// This implementation uses approach with window.print() so it works out of
+// the box with zero extra installs — swap the internals for a QZ Tray call
+// later if you want silent kiosk printing.
+function printKitchenTicket(order) {
+  try {
+    const iframe = document.createElement("iframe");
+    iframe.style.position = "fixed";
+    iframe.style.right = "0";
+    iframe.style.bottom = "0";
+    iframe.style.width = "0";
+    iframe.style.height = "0";
+    iframe.style.border = "0";
+    iframe.setAttribute("aria-hidden", "true");
+    document.body.appendChild(iframe);
+
+    const itemsHtml = order.items
+      .map((it) => {
+        const spice = it.spiceLevel ? `<div class="sub">Spice: ${escapeHtml(it.spiceLevel)}</div>` : "";
+        const notes = it.notes ? `<div class="sub">Note: ${escapeHtml(it.notes)}</div>` : "";
+        return `
+          <div class="line">
+            <span class="qty">${it.qty}x</span>
+            <span class="name">${escapeHtml(it.name)}</span>
+          </div>
+          ${spice}${notes}
+        `;
+      })
+      .join("");
+
+    const html = `
+      <html>
+        <head>
+          <title>KOT - Table ${escapeHtml(order.table)}</title>
+          <style>
+            @page { size: 80mm auto; margin: 0; }
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { font-family: 'Courier New', monospace; width: 80mm; padding: 8px 10px; color: #000; }
+            .center { text-align: center; }
+            .title { font-size: 17px; font-weight: 800; letter-spacing: 1px; }
+            .divider { border-top: 1px dashed #000; margin: 8px 0; }
+            .row { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 3px; }
+            .line { display: flex; gap: 8px; font-size: 15px; font-weight: 800; margin-top: 8px; }
+            .qty { min-width: 30px; }
+            .sub { font-size: 12px; padding-left: 38px; font-style: italic; }
+            .vip { text-align: center; font-weight: 900; margin-top: 6px; font-size: 13px; }
+            .footer { margin-top: 12px; font-size: 10px; text-align: center; }
+          </style>
+        </head>
+        <body>
+          <div class="center title">KITCHEN ORDER TICKET</div>
+          <div class="divider"></div>
+          <div class="row"><span>Table</span><span>${escapeHtml(order.table)}</span></div>
+          <div class="row"><span>Time</span><span>${new Date(order.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></div>
+          ${order.isVIP ? `<div class="vip">★ VIP ORDER ★</div>` : ""}
+          <div class="divider"></div>
+          ${itemsHtml}
+          <div class="divider"></div>
+          <div class="footer">Printed ${new Date().toLocaleString()}</div>
+        </body>
+      </html>
+    `;
+
+    const cleanup = () => {
+      if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+    };
+
+    iframe.onload = () => {
+      setTimeout(() => {
+        try {
+          iframe.contentWindow.focus();
+          iframe.contentWindow.print();
+        } catch (e) {
+          console.error("KOT print failed", e);
+        }
+        setTimeout(cleanup, 1500);
+      }, 200);
+    };
+
+    const doc = iframe.contentDocument || iframe.contentWindow.document;
+    doc.open();
+    doc.write(html);
+    doc.close();
+  } catch (e) {
+    console.error("printKitchenTicket failed", e);
+  }
+}
+
 // Module-scope on purpose — see the note in receptionist/page.js above
 // StatCard/OrderCard/MenuItemCard for why. Here it matters even more: this
 // page re-renders every second (the currentTime clock), so a component
@@ -152,6 +271,8 @@ function KitchenPage() {
   const [banner, setBanner] = useState(null);
 
   const prevConfirmedIds = useRef(null);
+  const DEFAULT_ETA = 20;
+  const ETA_PRESETS = [10, 15, 20, 25, 30];
 
   useEffect(() => {
     if (!restaurantId) return;
@@ -197,6 +318,9 @@ function KitchenPage() {
         showPopupNotification("🔔 New Order!", `Table ${latest.table} — ${itemCount} item(s)`, { tag: "kitchen-new-order", renotify: true });
         setMobileTab("confirmed");
         setTimeout(() => setBanner(null), 5500);
+
+        // Auto-print a Kitchen Order Ticket for every newly confirmed order.
+        newOnes.forEach((o) => printKitchenTicket(o));
       }
     }
     prevConfirmedIds.current = currentIds;
@@ -206,8 +330,8 @@ function KitchenPage() {
   const menuImageMap = {};
   menuItems.forEach((m) => { if (m.imageUrl) menuImageMap[m.name] = m.imageUrl; });
 
-  async function startCooking(id) {
-    const mins = parseInt(etaInputs[id]) || 10;
+  async function startCooking(id, presetMins) {
+    const mins = presetMins || parseInt(etaInputs[id]) || DEFAULT_ETA;
     await updateDoc(doc(db, "restaurants", restaurantId, "orders", id), { status: "preparing", etaMinutes: mins, preparingAt: Date.now() });
   }
   async function markReady(id) {
@@ -223,16 +347,32 @@ function KitchenPage() {
   function renderTicketActions(type, order) {
     if (type === "confirmed") {
       return (
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: isMobile ? "wrap" : "nowrap" }}>
-          <input type="number" placeholder="10" defaultValue={10} onChange={(e) => setEtaInputs((prev) => ({ ...prev, [order.id]: e.target.value }))}
-            style={{ width: isMobile ? 64 : 70, padding: isMobile ? "12px 10px" : "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", fontSize: 15, fontWeight: 600, textAlign: "center" }} />
-          <span style={{ color: "var(--text-secondary)", fontSize: 14 }}>min</span>
-          <button className="btn btn-primary" onClick={() => startCooking(order.id)} style={{ marginLeft: isMobile ? 0 : "auto", flex: isMobile ? "1 1 auto" : "none", padding: isMobile ? "14px 20px" : "12px 20px", fontSize: isMobile ? 15 : 14 }}>▶ Start Cooking</button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {ETA_PRESETS.map((m) => (
+              <button
+                key={m}
+                className="btn-preset"
+                onClick={() => startCooking(order.id, m)}
+                style={{ flex: isMobile ? "1 1 60px" : "0 0 auto" }}
+              >
+                {m}m
+              </button>
+            ))}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: isMobile ? "wrap" : "nowrap" }}>
+            <input type="number" placeholder={String(DEFAULT_ETA)} defaultValue={DEFAULT_ETA} onChange={(e) => setEtaInputs((prev) => ({ ...prev, [order.id]: e.target.value }))}
+              style={{ width: isMobile ? 64 : 70, padding: isMobile ? "12px 10px" : "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", fontSize: 15, fontWeight: 600, textAlign: "center" }} />
+            <span style={{ color: "var(--text-secondary)", fontSize: 14 }}>min (custom)</span>
+            <button className="btn btn-primary" onClick={() => startCooking(order.id)} style={{ marginLeft: isMobile ? 0 : "auto", flex: isMobile ? "1 1 auto" : "none" }}>
+              ▶ Start Cooking
+            </button>
+          </div>
         </div>
       );
     }
     if (type === "preparing") {
-      return <button className="btn btn-success" onClick={() => markReady(order.id)} style={{ width: "100%", padding: isMobile ? 16 : 14, fontSize: isMobile ? 16 : 15 }}>✓ Mark Ready for Pickup</button>;
+      return <button className="btn btn-success" onClick={() => markReady(order.id)} style={{ width: "100%" }}>✓ Mark Ready for Pickup</button>;
     }
     return <div style={{ background: "#dcfce7", color: "#166534", padding: "12px 16px", borderRadius: 10, textAlign: "center", fontWeight: 600, fontSize: 14 }}>Waiting for server pickup</div>;
   }
@@ -245,6 +385,44 @@ function KitchenPage() {
         @keyframes cardIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
         @keyframes pulseRed { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
         @keyframes countBump { 0% { transform: scale(1); } 40% { transform: scale(1.3); } 100% { transform: scale(1); } }
+
+        .btn {
+          border: none;
+          border-radius: 10px;
+          font-weight: 700;
+          cursor: pointer;
+          padding: 14px 20px;
+          font-size: 15px;
+          transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.12s ease;
+          box-shadow: 0 4px 14px rgba(0,0,0,0.12);
+        }
+        .btn:active { transform: translateY(1px) scale(0.99); }
+        .btn:hover { filter: brightness(1.06); box-shadow: 0 6px 18px rgba(0,0,0,0.16); }
+        .btn:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; filter: none; transform: none; }
+
+        .btn-primary {
+          background: linear-gradient(135deg, #3b82f6, #2563eb);
+          color: #fff;
+        }
+        .btn-success {
+          background: linear-gradient(135deg, #22c55e, #16a34a);
+          color: #fff;
+          padding: 16px 20px;
+          font-size: 16px;
+        }
+        .btn-preset {
+          border: 1.5px solid #3b82f6;
+          background: #eff6ff;
+          color: #1d4ed8;
+          font-weight: 800;
+          font-size: 13.5px;
+          padding: 9px 12px;
+          border-radius: 100px;
+          cursor: pointer;
+          transition: all 0.12s ease;
+        }
+        .btn-preset:hover { background: #3b82f6; color: #fff; }
+        .btn-preset:active { transform: scale(0.96); }
       `}</style>
 
       {banner && <OrderBanner table={banner.table} count={banner.count} onDismiss={() => setBanner(null)} />}
