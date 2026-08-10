@@ -207,7 +207,7 @@ function FoodTypeToggle({ value, onChange }) {
   );
 }
 
-function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, editFileInputRef, handleImageUpload, categories, saveEdit, cancelEdit, toggleAvailable, toggleFeatured, toggleChefSpecial, startEdit, deleteItem }) {
+function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, editFileInputRef, handleImageUpload, categories, saveEdit, cancelEdit, toggleAvailable, toggleFeatured, toggleChefSpecial, toggleHero, startEdit, deleteItem }) {
   if (isEditing) {
     return (
       <div className="card" style={{ padding: 16, borderRadius: 14, gridColumn: "1 / -1" }}>
@@ -264,6 +264,7 @@ function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, e
           {item.category === BAR_CATEGORY && <span style={{ background: "#7c3aed", color: "#fff", fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100 }}>🍸 BAR</span>}
           {item.chefSpecial && <span style={{ background: "#1a1a2e", color: "#fff", fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100 }}>CHEF'S SPECIAL</span>}
           {item.featured && <span style={{ background: "#e8a33d", color: "#fff", fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100 }}>★ FEATURED</span>}
+          {item.showInHero && <span style={{ background: "#0369a1", color: "#fff", fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100 }}>🎠 HERO #{(item.heroOrder ?? 0) + 1}</span>}
         </div>
         {!item.available && (
           <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -286,6 +287,7 @@ function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, e
           <button onClick={() => toggleAvailable(item)} className="btn btn-sm" style={{ background: item.available ? "var(--success-light, #dcfce7)" : "var(--warning-light, #fef3c7)", color: item.available ? "#166534" : "#92400e", border: "none", flex: 1, minWidth: 90 }}>{item.available ? "In Stock" : "Out"}</button>
           <button onClick={() => toggleFeatured(item)} className="btn btn-sm" style={{ background: item.featured ? "#e8a33d20" : "var(--surface-2, #f3efe6)", color: item.featured ? "#92400e" : "var(--text-secondary, #6b6b7b)", border: "none" }} title="Toggle featured">★</button>
           {!item.isCombo && <button onClick={() => toggleChefSpecial(item)} className="btn btn-sm" style={{ background: item.chefSpecial ? "#1a1a2e" : "var(--surface-2, #f3efe6)", color: item.chefSpecial ? "#fff" : "var(--text-secondary, #6b6b7b)", border: "none" }} title="Toggle chef's special">CS</button>}
+          <button onClick={() => toggleHero(item)} className="btn btn-sm" style={{ background: item.showInHero ? "#0369a1" : "var(--surface-2, #f3efe6)", color: item.showInHero ? "#fff" : "var(--text-secondary, #6b6b7b)", border: "none" }} title="Toggle hero carousel">🎠</button>
           <button onClick={() => startEdit(item)} className="btn btn-sm btn-ghost">Edit</button>
           <button onClick={() => deleteItem(item.id)} className="btn btn-sm btn-ghost" style={{ color: "var(--danger, #dc2626)" }}>Delete</button>
         </div>
@@ -416,10 +418,13 @@ function ReceptionPage() {
   const [posNotes, setPosNotes] = useState("");
   const [posSending, setPosSending] = useState(false);
 
-  // --- NEW: extra settings (bar toggle + badge thresholds) ---
-  const [siteSettings, setSiteSettings] = useState({ hasBar: false, thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50 });
-  const [siteSettingsForm, setSiteSettingsForm] = useState({ hasBar: false, thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50 });
+  // --- NEW: extra settings (bar toggle + badge thresholds + spotlight source) ---
+  const [siteSettings, setSiteSettings] = useState({ hasBar: false, thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50, spotlightMetric: "featured" });
+  const [siteSettingsForm, setSiteSettingsForm] = useState({ hasBar: false, thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50, spotlightMetric: "featured" });
   const [siteSettingsSaved, setSiteSettingsSaved] = useState(false);
+
+  // --- NEW: Hero Carousel manual picker ---
+  const [showManageHero, setShowManageHero] = useState(false);
 
   const editCategoryFileInputRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -498,7 +503,7 @@ function ReceptionPage() {
     const unsub = onSnapshot(doc(db, "restaurants", restaurantId, "info", "settings"), (snap) => {
       if (snap.exists()) {
         const d = snap.data();
-        const merged = { hasBar: !!d.hasBar, thresholdMostLoved: d.thresholdMostLoved ?? 4.5, thresholdMostOrdered: d.thresholdMostOrdered ?? 100, thresholdMostRated: d.thresholdMostRated ?? 50 };
+        const merged = { hasBar: !!d.hasBar, thresholdMostLoved: d.thresholdMostLoved ?? 4.5, thresholdMostOrdered: d.thresholdMostOrdered ?? 100, thresholdMostRated: d.thresholdMostRated ?? 50, spotlightMetric: d.spotlightMetric || "featured" };
         setSiteSettings(merged); setSiteSettingsForm(merged);
       }
     });
@@ -511,6 +516,49 @@ function ReceptionPage() {
     const unsub = onSnapshot(q, (snap) => setMenuItems(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
     return () => unsub();
   }, [restaurantId]);
+
+  // NEW: Most Loved / Most Ordered / Most Rated badges — previously the Settings
+  // thresholds weren't connected to anything. This recomputes each item's flags
+  // whenever orders, menu items, or the thresholds change, and only writes back
+  // to Firestore when a flag actually changed (so it can't loop on itself).
+  //   mostOrdered → total qty sold across billed/paid orders >= thresholdMostOrdered
+  //   mostLoved   → item.rating (avg out of 5, written by the customer review
+  //                 flow on the table page) >= thresholdMostLoved, with at least
+  //                 one review
+  //   mostRated   → item.ratingCount (also written by the review flow) >=
+  //                 thresholdMostRated
+  // If your table-side review flow doesn't yet write `rating` / `ratingCount`
+  // onto menu items, mostLoved/mostRated will simply stay off until it does —
+  // mostOrdered works immediately since it's derived from orders you already have.
+  useEffect(() => {
+    if (!restaurantId || menuItems.length === 0) return;
+    const soldQtyByItem = {};
+    orders.forEach((o) => {
+      if (o.status !== "billed" && o.status !== "paid") return;
+      (o.items || []).forEach((it) => {
+        const key = it.itemId || it.name;
+        soldQtyByItem[key] = (soldQtyByItem[key] || 0) + (it.qty || 0);
+      });
+    });
+    const updates = [];
+    menuItems.forEach((m) => {
+      const soldQty = soldQtyByItem[m.id] || soldQtyByItem[m.name] || 0;
+      const rating = m.rating || 0;
+      const ratingCount = m.ratingCount || 0;
+      const mostOrdered = soldQty >= (siteSettings.thresholdMostOrdered || 100);
+      const mostLoved = ratingCount > 0 && rating >= (siteSettings.thresholdMostLoved || 4.5);
+      const mostRated = ratingCount >= (siteSettings.thresholdMostRated || 50);
+      if (!!m.mostOrdered !== mostOrdered || !!m.mostLoved !== mostLoved || !!m.mostRated !== mostRated) {
+        updates.push({ id: m.id, mostOrdered, mostLoved, mostRated });
+      }
+    });
+    if (updates.length > 0) {
+      const batch = writeBatch(db);
+      updates.forEach((u) => batch.update(doc(db, "restaurants", restaurantId, "menuItems", u.id), { mostOrdered: u.mostOrdered, mostLoved: u.mostLoved, mostRated: u.mostRated }));
+      batch.commit().catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orders, menuItems, siteSettings.thresholdMostOrdered, siteSettings.thresholdMostLoved, siteSettings.thresholdMostRated, restaurantId]);
 
   useEffect(() => {
     if (!restaurantId) return;
@@ -731,7 +779,8 @@ function ReceptionPage() {
       thresholdMostLoved: parseFloat(siteSettingsForm.thresholdMostLoved) || 4.5,
       thresholdMostOrdered: parseInt(siteSettingsForm.thresholdMostOrdered) || 100,
       thresholdMostRated: parseInt(siteSettingsForm.thresholdMostRated) || 50,
-    }, { merge: true }); // merge: true — this doc also holds googleReviewLink / spotlightMetric
+      spotlightMetric: siteSettingsForm.spotlightMetric || "featured",
+    }, { merge: true }); // merge: true — this doc also holds googleReviewLink
     setSiteSettingsSaved(true);
     setTimeout(() => setSiteSettingsSaved(false), 2000);
   }
@@ -788,6 +837,7 @@ function ReceptionPage() {
       billTaxPercent: billing.taxPercent || 0, billTaxAmount: taxAmount,
       billServicePercent: billing.servicePercent || 0, billServiceAmount: serviceAmount, billTotal: grandTotal,
       paymentQrUrl: upiLink ? `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(upiLink)}` : null,
+      upiPayLink: upiLink || null,
       mergedTables: ordersToBill.length > 1 ? ordersToBill.map((ord) => ord.table) : null,
     };
     // Every order in the group gets the SAME consolidated bill written onto it —
@@ -947,6 +997,32 @@ function ReceptionPage() {
   async function toggleFeatured(item) { await updateDoc(doc(db, "restaurants", restaurantId, "menuItems", item.id), { featured: !item.featured }); }
   async function toggleChefSpecial(item) { await updateDoc(doc(db, "restaurants", restaurantId, "menuItems", item.id), { chefSpecial: !item.chefSpecial }); }
   async function deleteItem(id) { if (!confirm("Delete this item?")) return; await deleteDoc(doc(db, "restaurants", restaurantId, "menuItems", id)); }
+
+  // === NEW: Hero Carousel — manual pick + order (separate from "Featured", which
+  // still uses the existing ★ toggle). Tap the 🎠 button on any item card to add
+  // or remove it from the hero; use the Hero Carousel panel to reorder or remove.
+  async function toggleHeroItem(item) {
+    if (item.showInHero) {
+      await updateDoc(doc(db, "restaurants", restaurantId, "menuItems", item.id), { showInHero: false, heroOrder: null });
+    } else {
+      const maxOrder = menuItems.reduce((max, m) => (m.showInHero && typeof m.heroOrder === "number" ? Math.max(max, m.heroOrder) : max), -1);
+      await updateDoc(doc(db, "restaurants", restaurantId, "menuItems", item.id), { showInHero: true, heroOrder: maxOrder + 1 });
+    }
+  }
+  async function moveHeroItem(item, direction) {
+    const heroItems = menuItems.filter((m) => m.showInHero).sort((a, b) => (a.heroOrder || 0) - (b.heroOrder || 0));
+    const idx = heroItems.findIndex((m) => m.id === item.id);
+    const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+    if (swapIdx < 0 || swapIdx >= heroItems.length) return;
+    const other = heroItems[swapIdx];
+    const batch = writeBatch(db);
+    batch.update(doc(db, "restaurants", restaurantId, "menuItems", item.id), { heroOrder: other.heroOrder ?? swapIdx });
+    batch.update(doc(db, "restaurants", restaurantId, "menuItems", other.id), { heroOrder: item.heroOrder ?? idx });
+    await batch.commit();
+  }
+  async function removeFromHero(item) {
+    await updateDoc(doc(db, "restaurants", restaurantId, "menuItems", item.id), { showInHero: false, heroOrder: null });
+  }
 
   // === NEW: Smart Suggestions / Bundle rules ===
   function resetBundleForm() {
@@ -1129,21 +1205,54 @@ function ReceptionPage() {
     return "veg";
   }
   function cleanPrice(val) {
-    if (!val) return null;
-    const s = String(val).replace(/[₹,$\s]/g, "");
+    if (val === undefined || val === null || val === "") return null;
+    // Strip everything except digits and a decimal point (handles ₹, $, commas,
+    // thousands separators, stray spaces, "/-" suffixes, etc. all in one go).
+    const s = String(val).replace(/[^0-9.]/g, "");
+    if (!s) return null;
     const n = parseFloat(s);
-    return isNaN(n) ? null : n;
+    return isNaN(n) || n <= 0 ? null : n;
+  }
+
+  // Quote-aware CSV line splitter — handles commas and double-quotes inside
+  // quoted fields (e.g. a Description or Name that itself contains a comma),
+  // which a plain .split(",") would silently break and misalign every column
+  // after it (this was the root cause of "invalid price" on otherwise-valid rows).
+  function parseCSVLine(line) {
+    const values = [];
+    let current = "";
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (inQuotes) {
+        if (char === '"') {
+          if (line[i + 1] === '"') { current += '"'; i++; }
+          else { inQuotes = false; }
+        } else {
+          current += char;
+        }
+      } else if (char === '"') {
+        inQuotes = true;
+      } else if (char === ",") {
+        values.push(current.trim());
+        current = "";
+      } else {
+        current += char;
+      }
+    }
+    values.push(current.trim());
+    return values;
   }
 
   function parseCSV(text) {
     const lines = text.trim().split(/\r?\n/).filter((l) => l.trim());
     if (lines.length < 2) return [];
-    const headers = lines[0].split(",").map((h) => h.trim().toLowerCase());
+    const headers = parseCSVLine(lines[0]).map((h) => h.trim().toLowerCase());
     const rows = [];
     for (let i = 1; i < lines.length; i++) {
-      const values = lines[i].split(",").map((v) => v.trim());
+      const values = parseCSVLine(lines[i]);
       const row = {};
-      headers.forEach((h, idx) => { row[h] = values[idx] || ""; });
+      headers.forEach((h, idx) => { row[h] = (values[idx] || "").trim(); });
       rows.push(row);
     }
     return rows;
@@ -1177,7 +1286,7 @@ function ReceptionPage() {
 
       const price = cleanPrice(priceRaw);
       if (!name.trim()) { errors.push(`Row ${idx + 1}: Name is required`); return; }
-      if (price === null || price <= 0) { errors.push(`Row ${idx + 1}: Valid price is required`); return; }
+      if (price === null) { errors.push(`Row ${idx + 1}: Valid price is required (got "${priceRaw}")`); return; }
       if (!category.trim()) { errors.push(`Row ${idx + 1}: Category is required`); return; }
 
       items.push({
@@ -1283,7 +1392,7 @@ Paneer Tikka,320,Starters,Cottage cheese marinated in spices,veg,no,no,paneer-ti
 Butter Chicken,450,Mains,Tender chicken in rich tomato gravy,nonveg,yes,yes,butter-chicken.jpg
 Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,
 `);
-    zip.file("images/README.txt", "Put your photos in this folder.\nName each file to exactly match the ImageFile column in menu.csv (e.g. paneer-tikka.jpg).\nSupported formats: jpg, jpeg, png, webp, gif.");
+    zip.file("images/README.txt", "Put your photos in this folder.\nName each file to exactly match the ImageFile column in menu.csv (e.g. paneer-tikka.jpg).\nSupported formats: jpg, jpeg, png, webp, gif.\nThese photos are uploaded to Cloudinary automatically during import — you don't need to upload them anywhere yourself.");
     const blob = await zip.generateAsync({ type: "blob" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -1346,6 +1455,10 @@ Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,
     });
   }
 
+  // Plain CSV template — Name, Price, Category, Description, FoodType,
+  // ChefSpecial, Featured, ImageUrl. ImageUrl here must already be a hosted
+  // link (Cloudinary, imgur, etc.) — CSV alone has no way to attach local
+  // photo files. Use the ZIP format if you want to upload local photos.
   function downloadTemplate() {
     const csv = `Name,Price,Category,Description,FoodType,ChefSpecial,Featured,ImageUrl
 Paneer Tikka,320,Starters,Cottage cheese marinated in spices,veg,no,no,
@@ -1359,6 +1472,36 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     a.download = "menu-template.csv";
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  // NEW: a real, dedicated JSON template — previously the Download Template
+  // button ignored the active tab and always produced a .csv file, even on
+  // the JSON tab. This is a proper JSON array matching what parseImportData
+  // expects (name, price, category, description, foodType, chefSpecial,
+  // featured, imageUrl).
+  function downloadJsonTemplate() {
+    const json = JSON.stringify([
+      { name: "Paneer Tikka", price: 320, category: "Starters", description: "Cottage cheese marinated in spices", foodType: "veg", chefSpecial: false, featured: false, imageUrl: "" },
+      { name: "Butter Chicken", price: 450, category: "Mains", description: "Tender chicken in rich tomato gravy", foodType: "nonveg", chefSpecial: true, featured: true, imageUrl: "" },
+      { name: "Garlic Naan", price: 80, category: "Breads & Rice", description: "Soft naan brushed with garlic butter", foodType: "veg", chefSpecial: false, featured: false, imageUrl: "" },
+    ], null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "menu-template.json";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // NEW: lets CSV/JSON tabs accept an actual uploaded file (not just paste),
+  // reading its text content straight into the same textarea/preview flow.
+  function handleTextFileSelected(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => { setImportText(e.target.result); setImportPreview(null); };
+    reader.onerror = () => alert("Could not read that file.");
+    reader.readAsText(file);
   }
 
   async function executeImport() {
@@ -1816,6 +1959,18 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                       <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, fontSize: 16 }}><span>Total</span><span>₹{o.billTotal}</span></div>
                     </div>
 
+                    {o.upiPayLink && (
+                      <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: "#eff6ff", border: "1px solid #dbeafe", textAlign: "center" }}>
+                        <div style={{ fontSize: 11.5, fontWeight: 800, color: "#1e40af", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>Customer Self-Pay (UPI)</div>
+                        <img src={o.paymentQrUrl} alt="Scan to pay" style={{ width: 120, height: 120, marginBottom: 8, borderRadius: 8, background: "#fff" }} />
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <a href={o.upiPayLink} className="btn btn-sm btn-primary" style={{ flex: 1, textDecoration: "none" }}>Open in UPI App</a>
+                          <button className="btn btn-sm btn-ghost" onClick={() => { navigator.clipboard.writeText(o.upiPayLink); alert("Payment link copied"); }}>Copy Link</button>
+                        </div>
+                        <div style={{ fontSize: 10.5, color: "#64748b", marginTop: 6 }}>Scan or tap to pay — then confirm below once it lands in your UPI app.</div>
+                      </div>
+                    )}
+
                     {o.billSplits && o.billSplits.length > 0 ? (
                       <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6 }}>
                         {o.billSplits.map((s) => (
@@ -1853,12 +2008,12 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     return (
       <div>
         <h2 style={{ fontSize: 24, fontWeight: 800, marginBottom: 20, fontFamily: "'Fraunces', serif" }}>Point of Sale</h2>
-        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 320px", gap: 18, alignItems: "flex-start" }}>
+        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1fr) 320px", gap: 18, alignItems: "flex-start" }}>
 
           {/* MENU: menu browser */}
-          <div className="card" style={{ padding: 16, borderRadius: 16 }}>
+          <div className="card" style={{ padding: 16, borderRadius: 16, minWidth: 0 }}>
             <input placeholder="Search menu..." value={posSearch} onChange={(e) => setPosSearch(e.target.value)} style={{ ...inputStyle, marginBottom: 12 }} />
-            <div style={{ display: "flex", gap: 8, overflowX: "auto", marginBottom: 14, paddingBottom: 4 }}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
               {posCategories.map((c) => (
                 <button key={c.id} onClick={() => setPosCategoryTab(c.name === "all" ? "all" : c.name)}
                   style={{ padding: "7px 14px", borderRadius: 100, border: "none", whiteSpace: "nowrap", fontSize: 12.5, fontWeight: 700, cursor: "pointer", background: posCategoryTab === c.name ? "#1a1a2e" : "var(--surface-2, #f3efe6)", color: posCategoryTab === c.name ? "#fff" : "#666" }}>
@@ -1886,7 +2041,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
           </div>
 
           {/* RIGHT: cart on top, table / quick-order picker below it */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 18, position: isMobile ? "static" : "sticky", top: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 18, position: isMobile ? "static" : "sticky", top: 16, minWidth: 0 }}>
           <div className="card" style={{ padding: 16, borderRadius: 16 }}>
             <h3 style={{ fontSize: 14.5, fontWeight: 800, marginBottom: 10 }}>
               {posOrderType === "takeaway" ? "📦 Takeaway Order" : posTable ? `Table ${posTable}` : "Select a table"}
@@ -1975,8 +2130,9 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
           {features.combos && <button className="btn btn-ghost" onClick={() => { setShowAddCombo((s) => !s); setShowAddItem(false); setShowAddCategory(false); setShowImportModal(false); setShowAddBundleRule(false); setShowAddPromo(false); }}>{showAddCombo ? "Close" : "+ Add Combo"}</button>}
           <button className="btn btn-ghost" onClick={() => { setShowAddCategory((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowImportModal(false); setShowAddBundleRule(false); setShowAddPromo(false); }}>{showAddCategory ? "Close" : "+ Add Category"}</button>
           {features.promoBanner && <button className="btn btn-ghost" onClick={() => { setShowAddPromo((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowAddBundleRule(false); }}>{showAddPromo ? "Close" : "+ Add Exclusive Deal"}</button>}
-          {features.smartSuggestions && <button className="btn btn-ghost" onClick={() => { setShowAddBundleRule((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowAddPromo(false); }}>{showAddBundleRule ? "Close" : "+ Smart Deal"}</button>}
-          <button className="btn btn-primary" onClick={() => { setShowImportModal(true); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowAddBundleRule(false); setShowAddPromo(false); }}>↑ Import Menu</button>
+          {features.smartSuggestions && <button className="btn btn-ghost" onClick={() => { setShowAddBundleRule((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowAddPromo(false); setShowManageHero(false); }}>{showAddBundleRule ? "Close" : "+ Smart Deal"}</button>}
+          <button className="btn btn-ghost" onClick={() => { setShowManageHero((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowAddBundleRule(false); setShowAddPromo(false); }}>{showManageHero ? "Close" : "🎠 Hero Carousel"}</button>
+          <button className="btn btn-primary" onClick={() => { setShowImportModal(true); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowAddBundleRule(false); setShowAddPromo(false); setShowManageHero(false); }}>↑ Import Menu</button>
         </div>
       </div>
 
@@ -2001,6 +2157,37 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
           <button className="btn btn-primary" onClick={savePromoBanner}>{promoSaved ? "Saved ✓" : "Save Banner"}</button>
         </div>
       )}
+
+      {/* NEW: Hero Carousel — stupidly-simple manual pick + reorder. Tap the 🎠
+          button on any item card (below) to add/remove it from the hero; use the
+          arrows here to reorder. Featured section is unchanged — still the ★ button. */}
+      {showManageHero && (() => {
+        const heroItems = menuItems.filter((m) => m.showInHero).sort((a, b) => (a.heroOrder || 0) - (b.heroOrder || 0));
+        return (
+          <div className="card" style={{ padding: 20, borderRadius: 16, marginBottom: 20, border: "2px dashed #0369a1" }}>
+            <h3 style={{ fontSize: 14.5, fontWeight: 700, marginBottom: 6 }}>🎠 Hero Carousel</h3>
+            <p style={{ fontSize: 12.5, color: "var(--text-secondary, #6b6b7b)", marginBottom: 14 }}>
+              This controls exactly which items scroll in the customer menu's hero banner, and in what order. Tap the 🎠 button on any item card below to add or remove it — reorder with the arrows here.
+            </p>
+            {heroItems.length === 0 ? (
+              <p style={{ fontSize: 13, color: "#999" }}>No items in the hero carousel yet. Tap 🎠 on any item card below to add one.</p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {heroItems.map((item, i) => (
+                  <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "var(--surface-2, #f3efe6)", borderRadius: 10 }}>
+                    <span style={{ width: 22, height: 22, borderRadius: "50%", background: "#0369a1", color: "#fff", fontSize: 11.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{i + 1}</span>
+                    {item.imageUrl && <img src={item.imageUrl} alt="" style={{ width: 34, height: 34, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />}
+                    <span style={{ fontWeight: 700, fontSize: 13, flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.name}</span>
+                    <button className="btn btn-sm btn-ghost" disabled={i === 0} onClick={() => moveHeroItem(item, "up")} style={{ padding: "4px 10px", opacity: i === 0 ? 0.4 : 1 }}>↑</button>
+                    <button className="btn btn-sm btn-ghost" disabled={i === heroItems.length - 1} onClick={() => moveHeroItem(item, "down")} style={{ padding: "4px 10px", opacity: i === heroItems.length - 1 ? 0.4 : 1 }}>↓</button>
+                    <button className="btn btn-sm btn-ghost" onClick={() => removeFromHero(item)} style={{ padding: "4px 10px", color: "#dc2626" }}>Remove</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* NEW: Smart Suggestions / Bundle Discount rule builder */}
       {showAddBundleRule && (
@@ -2131,20 +2318,24 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
           {!importReport && (
           <>
           <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-            <button onClick={() => { setImportFormat("csv"); setImportPreview(null); }} style={{ padding: "6px 14px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 700, cursor: "pointer", background: importFormat === "csv" ? "#1a1a2e" : "#f3efe6", color: importFormat === "csv" ? "#fff" : "#666" }}>CSV</button>
-            <button onClick={() => { setImportFormat("json"); setImportPreview(null); }} style={{ padding: "6px 14px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 700, cursor: "pointer", background: importFormat === "json" ? "#1a1a2e" : "#f3efe6", color: importFormat === "json" ? "#fff" : "#666" }}>JSON</button>
+            <button onClick={() => { setImportFormat("csv"); setImportPreview(null); setImportText(""); }} style={{ padding: "6px 14px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 700, cursor: "pointer", background: importFormat === "csv" ? "#1a1a2e" : "#f3efe6", color: importFormat === "csv" ? "#fff" : "#666" }}>CSV</button>
+            <button onClick={() => { setImportFormat("json"); setImportPreview(null); setImportText(""); }} style={{ padding: "6px 14px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 700, cursor: "pointer", background: importFormat === "json" ? "#1a1a2e" : "#f3efe6", color: importFormat === "json" ? "#fff" : "#666" }}>JSON</button>
             <button onClick={() => { setImportFormat("zip"); setImportPreview(null); }} style={{ padding: "6px 14px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 700, cursor: "pointer", background: importFormat === "zip" ? "#1a1a2e" : "#f3efe6", color: importFormat === "zip" ? "#fff" : "#666" }}>ZIP (CSV + Photos)</button>
-            {importFormat === "zip"
-              ? <button onClick={downloadZipTemplate} className="btn btn-sm btn-ghost" style={{ marginLeft: "auto" }}>↓ Download ZIP Template</button>
-              : <button onClick={downloadTemplate} className="btn btn-sm btn-ghost" style={{ marginLeft: "auto" }}>↓ Download Template</button>}
+            {importFormat === "zip" ? (
+              <button onClick={downloadZipTemplate} className="btn btn-sm btn-ghost" style={{ marginLeft: "auto" }}>↓ Download ZIP Template</button>
+            ) : importFormat === "json" ? (
+              <button onClick={downloadJsonTemplate} className="btn btn-sm btn-ghost" style={{ marginLeft: "auto" }}>↓ Download JSON Template</button>
+            ) : (
+              <button onClick={downloadTemplate} className="btn btn-sm btn-ghost" style={{ marginLeft: "auto" }}>↓ Download CSV Template</button>
+            )}
           </div>
 
           <p style={{ fontSize: 12.5, color: "#6b6b7b", marginBottom: 12 }}>
             {importFormat === "csv"
-              ? "Paste CSV text below. Columns: Name, Price, Category, Description, FoodType, ChefSpecial, Featured, ImageUrl"
+              ? "Upload a .csv file or paste CSV text below. Columns: Name, Price, Category, Description, FoodType, ChefSpecial, Featured, ImageUrl. (ImageUrl must already be a hosted link — CSV can't carry local photo files.)"
               : importFormat === "json"
-              ? "Paste JSON array below. Each object needs: name, price, category. Optional: description, foodType, chefSpecial, featured, imageUrl"
-              : "Upload a .zip containing one menu.csv (with an ImageFile column, e.g. paneer-tikka.jpg) and an images/ folder with matching photos. Photos are uploaded to Cloudinary automatically."}
+              ? "Upload a .json file or paste a JSON array below. Each object needs: name, price, category. Optional: description, foodType, chefSpecial, featured, imageUrl."
+              : "Upload a .zip containing one menu.csv (with an ImageFile column, e.g. paneer-tikka.jpg) and an images/ folder with matching photos. Photos are uploaded to Cloudinary automatically — no manual upload needed."}
           </p>
 
           {importFormat === "zip" ? (
@@ -2155,6 +2346,16 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
             </div>
           ) : (
             <>
+              <div style={{ marginBottom: 10, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <input
+                  type="file"
+                  accept={importFormat === "csv" ? ".csv,text/csv" : ".json,application/json"}
+                  onChange={(e) => handleTextFileSelected(e.target.files[0])}
+                  style={{ fontSize: 13 }}
+                />
+                <span style={{ fontSize: 11.5, color: "#999" }}>or paste directly below</span>
+              </div>
+
               <textarea
                 value={importText}
                 onChange={(e) => { setImportText(e.target.value); setImportPreview(null); }}
@@ -2476,6 +2677,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
               toggleAvailable={toggleAvailable}
               toggleFeatured={toggleFeatured}
               toggleChefSpecial={toggleChefSpecial}
+              toggleHero={toggleHeroItem}
               startEdit={startEdit}
               deleteItem={deleteItem}
             />
@@ -2671,7 +2873,17 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
             <input type="number" value={siteSettingsForm.thresholdMostRated} onChange={(e) => setSiteSettingsForm((p) => ({ ...p, thresholdMostRated: e.target.value }))} style={inputStyle} />
           </div>
         </div>
-        <button className="btn btn-primary" onClick={saveSiteSettings} style={{ marginTop: 14 }}>{siteSettingsSaved ? "Saved ✓" : "Save Settings"}</button>
+        <p style={{ fontSize: 11.5, color: "#999", marginTop: 10, marginBottom: 14 }}>
+          These badges are now calculated automatically — Most Ordered from your billed/paid orders, Most Loved and Most Rated from item ratings (once your review flow is writing <code>rating</code>/<code>ratingCount</code> onto menu items). No manual tagging needed.
+        </p>
+        <label style={labelStyle}>Spotlight Card Shows</label>
+        <select value={siteSettingsForm.spotlightMetric} onChange={(e) => setSiteSettingsForm((p) => ({ ...p, spotlightMetric: e.target.value }))} style={inputStyle}>
+          <option value="featured">Featured item (★ toggle on item cards)</option>
+          <option value="mostLoved">Most Loved item</option>
+          <option value="mostOrdered">Most Ordered item</option>
+          <option value="mostRated">Most Rated item</option>
+        </select>
+        <button className="btn btn-primary" onClick={saveSiteSettings} style={{ marginTop: 4 }}>{siteSettingsSaved ? "Saved ✓" : "Save Settings"}</button>
       </div>
 
       {/* Billing + Staff side by side */}
