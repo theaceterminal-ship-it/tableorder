@@ -18,7 +18,7 @@
 // Firestore fields this page expects to exist (maintained elsewhere — reception
 // dashboard / a future aggregation job, not by this file):
 //   menuItems/{id}: averageRating, reviewCount, mostLoved, mostOrdered, mostRated
-//   info/settings: googleReviewLink, spotlightMetric ("mostLoved"|"mostOrdered"|"mostRated")
+//   info/settings: googleReviewLink
 // This file reads them defensively — everything degrades gracefully if absent.
 
 import { Suspense, useEffect, useState, useRef, useMemo } from "react";
@@ -41,6 +41,9 @@ const CATEGORY_ICONS = {
   Shakes: "🥤", Milkshakes: "🥤", Juices: "🧃", Desserts: "🍰", "Ice Cream": "🍨",
   "Live Counter": "👨‍🍳", Combos: "🍱", "Combo Packs": "🍱", "Kids Menu": "🧒",
 };
+
+// NEW: catchy background palette for the "Loved by Everyone" spotlight carousel.
+const SPOTLIGHT_COLORS = ["#FFF4E0", "#E7F8EF", "#EAF1FF", "#FDEAF0", "#F3ECFF"];
 
 const MEAL_COMPLETION_RULES = {
   "Mains": { needs: ["Breads & Rice", "Bread", "Rice", "Breads"], suggestCategory: "Breads & Rice" },
@@ -202,55 +205,6 @@ function MenuCard({ item, qty, onAdd, onOpenDetail, width }) {
             )}
           </div>
           {qty > 0 && (<span style={{ background: "#1a1a2e", color: "#fff", padding: "2px 10px", borderRadius: 100, fontSize: 12, fontWeight: 700 }}>{qty}</span>)}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// Spotlight card — the single large feature between category pills & Popular
-// Picks, matching the reference layout. Which metric it spotlights is set by
-// the receptionist (info/settings.spotlightMetric).
-function SpotlightCard({ item, metric, onAdd }) {
-  if (!item) return null;
-  const badge = metric === "mostOrdered"
-    ? { icon: "🔥", label: "Most Ordered" }
-    : metric === "mostRated"
-      ? { icon: "⭐", label: "Most Rated" }
-      : { icon: "🔥", label: "Most Loved" };
-
-  return (
-    <div style={{ padding: "0 20px 22px" }}>
-      <div style={{ background: "#fff", borderRadius: 20, padding: 16, border: "1px solid #f0f0f0", boxShadow: "0 4px 20px rgba(0,0,0,0.05)", display: "flex", gap: 16 }}>
-        <div style={{ position: "relative", width: 128, height: 128, borderRadius: 16, overflow: "hidden", flexShrink: 0, background: "#f8f6f3" }}>
-          {item.imageUrl ? (
-            <img src={item.imageUrl} alt={item.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-          ) : (
-            <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 36 }}>🍽️</div>
-          )}
-          <span style={{ position: "absolute", top: 8, left: 8, background: "#fff5e0", color: "#92400e", fontSize: 9.5, fontWeight: 800, padding: "3px 8px", borderRadius: 100, display: "flex", alignItems: "center", gap: 3, boxShadow: "0 2px 6px rgba(0,0,0,0.1)" }}>
-            {badge.icon} {badge.label}
-          </span>
-        </div>
-        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <VegBadge foodType={item.foodType} />
-            <div style={{ fontWeight: 800, fontSize: 16, color: "#1a1a2e", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</div>
-          </div>
-          {item.description && (
-            <div style={{ fontSize: 12, color: "#888", marginTop: 4, lineHeight: 1.4 }}>
-              {item.description.slice(0, 62)}{item.description.length > 62 ? "…" : ""}
-            </div>
-          )}
-          <div style={{ marginTop: "auto", display: "flex", alignItems: "center", justifyContent: "space-between", paddingTop: 10 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ fontWeight: 800, fontSize: 17, color: "#e8a33d" }}>₹{item.price}</span>
-              {(item.averageRating || item.reviewCount) && <RatingBadge rating={item.averageRating} count={item.reviewCount} />}
-            </div>
-            <button onClick={() => onAdd(item.id, 1)} className="tap-btn" style={{ padding: "9px 20px", borderRadius: 10, border: "none", background: "#e8a33d", color: "#1a1a2e", fontWeight: 800, fontSize: 13, cursor: "pointer", flexShrink: 0 }}>
-              Add +
-            </button>
-          </div>
         </div>
       </div>
     </div>
@@ -486,7 +440,7 @@ function StatusToast({ emoji, msg }) {
 }
 
 // ---------------------------------------------------------------------------
-// Recommendation banners — REDESIGNED: real photo cards, not text rows.
+// Recommendation banners
 // ---------------------------------------------------------------------------
 
 // "People also ordered" — exactly 2 items, each a full mini product card
@@ -650,8 +604,8 @@ function TableContent() {
   const [tables, setTables] = useState([]);
   const [activeCategory, setActiveCategory] = useState("All");
   const [showCartSummary, setShowCartSummary] = useState(false);
-  const [heroIndex, setHeroIndex] = useState(0);
-  const [heroItems, setHeroItems] = useState([]);
+  const [offerIndex, setOfferIndex] = useState(0);
+  const [offerBanners, setOfferBanners] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [categoryDocs, setCategoryDocs] = useState([]);
   const [screen, setScreen] = useState("menu");
@@ -665,16 +619,16 @@ function TableContent() {
   // adding a brand-new one. Set by openLineCustomize(), cleared on close.
   const [editingLineId, setEditingLineId] = useState(null);
   const [ratingOrder, setRatingOrder] = useState(null);
-  const [vegFilter, setVegFilter] = useState("all");
+  const [vegOnly, setVegOnly] = useState(false);
   const [promoBanner, setPromoBanner] = useState(null);
   const [googleReviewLink, setGoogleReviewLink] = useState("");
-  const [spotlightMetric, setSpotlightMetric] = useState("mostLoved");
   const [bundleRules, setBundleRules] = useState([]); // Smart Deals — same collection reception manages
   const [exploreFilter, setExploreFilter] = useState("all");
   const [showExploreFilter, setShowExploreFilter] = useState(false);
   const [showWaiterModal, setShowWaiterModal] = useState(false);
 
-  const heroScrollRef = useRef(null);
+  const offerScrollRef = useRef(null);
+  const spotlightScrollRef = useRef(null);
   const prevCartCountRef = useRef(0);
   const prevActiveOrdersRef = useRef([]);
   const prevStatusMapRef = useRef({});
@@ -706,7 +660,6 @@ function TableContent() {
       if (snap.exists()) {
         const data = snap.data();
         setGoogleReviewLink(data.googleReviewLink || "");
-        setSpotlightMetric(data.spotlightMetric || "mostLoved");
       }
     });
     return () => unsub();
@@ -723,11 +676,17 @@ function TableContent() {
     if (!restaurantId) return;
     const q = query(collection(db, "restaurants", restaurantId, "menuItems"), orderBy("createdAt", "asc"));
     const unsub = onSnapshot(q, (snap) => {
-      const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      setMenuItems(items);
-      const featured = items.filter((m) => m.available && m.imageUrl).slice(0, 5);
-      setHeroItems(featured);
+      setMenuItems(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
     });
+    return () => unsub();
+  }, [restaurantId]);
+
+  // NEW: Offer Carousel — reception-curated exclusive deal banners (up to 8),
+  // replaces the old auto-picked hero carousel. Hidden entirely if empty.
+  useEffect(() => {
+    if (!restaurantId) return;
+    const q = query(collection(db, "restaurants", restaurantId, "offerBanners"), orderBy("order", "asc"));
+    const unsub = onSnapshot(q, (snap) => setOfferBanners(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
     return () => unsub();
   }, [restaurantId]);
 
@@ -794,17 +753,31 @@ function TableContent() {
   }, [allOrdersRaw]);
 
   useEffect(() => {
-    if (heroItems.length <= 1) return;
+    if (offerBanners.length <= 1) return;
     const t = setInterval(() => {
-      setHeroIndex((prev) => {
-        const next = (prev + 1) % heroItems.length;
-        const el = heroScrollRef.current;
+      setOfferIndex((prev) => {
+        const next = (prev + 1) % offerBanners.length;
+        const el = offerScrollRef.current;
         if (el) el.scrollTo({ left: next * el.clientWidth, behavior: "smooth" });
         return next;
       });
     }, 4000);
     return () => clearInterval(t);
-  }, [heroItems.length]);
+  }, [offerBanners.length]);
+
+  // NEW: auto-scroll the "Loved by Everyone" spotlight carousel one card at a
+  // time, looping back to the start once it reaches the end.
+  useEffect(() => {
+    const t = setInterval(() => {
+      const el = spotlightScrollRef.current;
+      if (!el || el.scrollWidth <= el.clientWidth) return;
+      const cardStep = 180;
+      const maxScroll = el.scrollWidth - el.clientWidth;
+      const next = el.scrollLeft + cardStep > maxScroll + 4 ? 0 : el.scrollLeft + cardStep;
+      el.scrollTo({ left: next, behavior: "smooth" });
+    }, 2800);
+    return () => clearInterval(t);
+  }, [menuItems.length]);
 
   useEffect(() => {
     const c = Object.values(cart).reduce((a, l) => a + l.qty, 0);
@@ -828,21 +801,28 @@ function TableContent() {
     setTimeout(() => setShowSplash(false), 350);
   }
 
-  function handleHeroScroll(e) {
+  function handleOfferScroll(e) {
     const el = e.currentTarget;
     if (!el.clientWidth) return;
     const idx = Math.round(el.scrollLeft / el.clientWidth);
-    if (idx !== heroIndex) setHeroIndex(idx);
+    if (idx !== offerIndex) setOfferIndex(idx);
   }
-  function scrollHeroTo(idx) {
-    setHeroIndex(idx);
-    const el = heroScrollRef.current;
+  function scrollOfferTo(idx) {
+    setOfferIndex(idx);
+    const el = offerScrollRef.current;
     if (el) el.scrollTo({ left: idx * el.clientWidth, behavior: "smooth" });
+  }
+  function handleOfferBannerClick(banner) {
+    if (!banner.linkedItemId) return;
+    playTone(680, 90, "triangle");
+    addToCart(banner.linkedItemId, 1);
+    const item = findItem(banner.linkedItemId);
+    triggerSuccessOverlay(item ? `${item.name} added!` : "Added to cart!");
   }
 
   const currentTableDoc = tables.find((t) => t.number === tableNo);
   const availableItemsRaw = menuItems.filter((m) => m.available);
-  const availableItems = vegFilter === "all" ? availableItemsRaw : availableItemsRaw.filter((m) => m.foodType === vegFilter);
+  const availableItems = vegOnly ? availableItemsRaw.filter((m) => m.foodType === "veg") : availableItemsRaw;
 
   const categoryIconMap = {};
   categoryDocs.forEach((c) => { if (c.imageUrl) categoryIconMap[c.name] = c.imageUrl; });
@@ -858,19 +838,16 @@ function TableContent() {
     ? availableItems.filter((m) => m.name.toLowerCase().includes(searchQuery.trim().toLowerCase()))
     : [];
 
-  // Which single item gets the big spotlight card, based on the receptionist's
-  // chosen metric — falls back sensibly if nothing is flagged yet.
-  const spotlightItem = useMemo(() => {
-    const flagKey = spotlightMetric === "mostOrdered" ? "mostOrdered" : spotlightMetric === "mostRated" ? "mostRated" : "mostLoved";
-    const flagged = availableItems.filter((m) => m[flagKey]);
-    if (flagged.length > 0) {
-      return [...flagged].sort((a, b) => (b.averageRating || 0) - (a.averageRating || 0))[0];
-    }
-    const featured = availableItems.find((m) => m.featured);
-    if (featured) return featured;
-    const rated = [...availableItems].filter((m) => m.averageRating).sort((a, b) => b.averageRating - a.averageRating);
-    return rated[0] || null;
-  }, [availableItems, spotlightMetric]);
+  // NEW: up to 5 standout items (Most Loved / Most Ordered / Most Rated /
+  // Featured), ranked by how many badges they carry then by rating — shown
+  // as an auto-scrolling, colourfully-boxed carousel instead of one static card.
+  const spotlightItems = useMemo(() => {
+    const scored = availableItems
+      .map((m) => ({ item: m, score: (m.mostLoved ? 3 : 0) + (m.mostOrdered ? 2 : 0) + (m.mostRated ? 1 : 0) + (m.featured ? 0.5 : 0) }))
+      .filter((s) => s.score > 0 || s.item.averageRating);
+    scored.sort((a, b) => b.score - a.score || (b.item.averageRating || 0) - (a.item.averageRating || 0));
+    return scored.slice(0, 5).map((s) => s.item);
+  }, [availableItems]);
 
   function findItem(id) { return menuItems.find((m) => m.id === id); }
 
@@ -1460,19 +1437,16 @@ function TableContent() {
                 style={{ width: "100%", padding: "11px 14px 11px 40px", borderRadius: 14, border: "none", background: "rgba(255,255,255,0.75)", fontSize: 13.5, outline: "none", boxSizing: "border-box", color: "#1a1a2e" }}
               />
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, background: "rgba(255,255,255,0.65)", borderRadius: 100, padding: "5px 10px 5px 12px" }}>
-              <span style={{ fontSize: 13 }}>🌿</span>
-              <div style={{ display: "flex", gap: 3 }}>
-                {["all", "veg", "nonveg"].map((f) => (
-                  <button key={f} onClick={() => { playTone(500, 50); setVegFilter(f); }}
-                    style={{ padding: "5px 9px", borderRadius: 100, border: "none", cursor: "pointer", fontSize: 10.5, fontWeight: 800,
-                      background: vegFilter === f ? (f === "veg" ? "#16a34a" : f === "nonveg" ? "#dc2626" : "#1a1a2e") : "transparent",
-                      color: vegFilter === f ? "#fff" : "#888" }}>
-                    {f === "all" ? "All" : f === "veg" ? "Veg" : "Non-veg"}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <button
+              onClick={() => { playTone(500, 50); setVegOnly((v) => !v); }}
+              className="tap-btn"
+              style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, background: vegOnly ? "#16a34a" : "rgba(255,255,255,0.65)", borderRadius: 100, padding: "7px 12px", border: "none", cursor: "pointer" }}
+            >
+              <span style={{ width: 12, height: 12, border: `1.5px solid ${vegOnly ? "#fff" : "#16a34a"}`, borderRadius: 3, position: "relative", display: "inline-block", flexShrink: 0 }}>
+                <span style={{ position: "absolute", inset: 1.5, borderRadius: "50%", background: vegOnly ? "#fff" : "#16a34a" }} />
+              </span>
+              <span style={{ fontSize: 11, fontWeight: 800, color: vegOnly ? "#fff" : "#1a1a2e" }}>Veg Only</span>
+            </button>
           </div>
         </div>
       </div>
@@ -1491,19 +1465,33 @@ function TableContent() {
           </div>
         ) : (
           <>
-            {/* ===== HERO BANNER: Image ONLY ===== */}
-            {heroItems.length > 0 && !addingMore && (
+            {/* ===== OFFER CAROUSEL: reception-curated exclusive deals — hidden if empty ===== */}
+            {offerBanners.length > 0 && !addingMore && (
               <div style={{ padding: "16px 20px 0" }}>
-                <div ref={heroScrollRef} onScroll={handleHeroScroll} className="hscroll" style={{ display: "flex", overflowX: "auto", scrollSnapType: "x mandatory", borderRadius: 20, WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
-                  {heroItems.map((item) => (
-                    <div key={item.id} style={{ flex: "0 0 100%", scrollSnapAlign: "start", position: "relative", aspectRatio: "16 / 9", background: "#1a1a2e", overflow: "hidden" }}>
-                      <img src={item.imageUrl} alt={item.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                    </div>
-                  ))}
+                <div ref={offerScrollRef} onScroll={handleOfferScroll} className="hscroll" style={{ display: "flex", overflowX: "auto", scrollSnapType: "x mandatory", borderRadius: 20, WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
+                  {offerBanners.map((banner) => {
+                    const linkedItem = findItem(banner.linkedItemId);
+                    return (
+                      <div key={banner.id} onClick={() => handleOfferBannerClick(banner)} className="tap-btn" style={{ flex: "0 0 100%", scrollSnapAlign: "start", position: "relative", aspectRatio: "16 / 9", background: "#1a1a2e", overflow: "hidden", cursor: banner.linkedItemId ? "pointer" : "default" }}>
+                        {banner.imageUrl && <img src={banner.imageUrl} alt={banner.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
+                        <div style={{ position: "absolute", inset: 0, background: "linear-gradient(to top, rgba(0,0,0,0.82) 0%, rgba(0,0,0,0.15) 55%, rgba(0,0,0,0) 75%)" }} />
+                        <div style={{ position: "absolute", left: 18, right: 18, bottom: 16 }}>
+                          <div style={{ fontSize: 10.5, fontWeight: 800, color: "#e8a33d", textTransform: "uppercase", letterSpacing: 0.7, marginBottom: 5 }}>🎉 Exclusive Deal</div>
+                          <div style={{ fontSize: 19, fontWeight: 800, color: "#fff", lineHeight: 1.25 }}>{banner.title}</div>
+                          {linkedItem && (
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+                              <span style={{ fontSize: 12.5, color: "rgba(255,255,255,0.9)", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 160 }}>{linkedItem.name}</span>
+                              <span style={{ fontSize: 12.5, fontWeight: 800, color: "#1a1a2e", background: "#e8a33d", padding: "3px 10px", borderRadius: 100 }}>₹{linkedItem.price} · Tap to add</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-                {heroItems.length > 1 && (
+                {offerBanners.length > 1 && (
                   <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 10 }}>
-                    {heroItems.map((_, idx) => (<div key={idx} onClick={() => scrollHeroTo(idx)} style={{ width: 8, height: 8, borderRadius: "50%", background: idx === heroIndex ? "#e8a33d" : "#ddd", cursor: "pointer" }} />))}
+                    {offerBanners.map((_, idx) => (<div key={idx} onClick={() => scrollOfferTo(idx)} style={{ width: 8, height: 8, borderRadius: "50%", background: idx === offerIndex ? "#e8a33d" : "#ddd", cursor: "pointer" }} />))}
                   </div>
                 )}
               </div>
@@ -1527,10 +1515,34 @@ function TableContent() {
               </div>
             </div>
 
-            {/* ===== SPOTLIGHT CARD: Most Loved / Most Ordered / Most Rated ===== */}
-            <div style={{ marginTop: 18 }}>
-              <SpotlightCard item={spotlightItem} metric={spotlightMetric} onAdd={addToCart} />
-            </div>
+            {/* ===== SPOTLIGHT CAROUSEL: up to 5 standout items, auto-scrolling, catchy backgrounds ===== */}
+            {spotlightItems.length > 0 && (
+              <div style={{ marginTop: 18, padding: "0 20px 4px" }}>
+                <h2 style={{ fontFamily: DISPLAY_FONT, fontWeight: 400, fontSize: 19, color: "#1a1a2e", textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 12 }}>Loved by Everyone</h2>
+                <div ref={spotlightScrollRef} className="hscroll" style={{ display: "flex", gap: 12, overflowX: "auto", paddingBottom: 8, scrollbarWidth: "none" }}>
+                  {spotlightItems.map((item, i) => {
+                    const bg = SPOTLIGHT_COLORS[i % SPOTLIGHT_COLORS.length];
+                    const badge = item.mostLoved ? { icon: "🔥", label: "Most Loved" } : item.mostOrdered ? { icon: "🔥", label: "Most Ordered" } : item.mostRated ? { icon: "⭐", label: "Most Rated" } : { icon: "★", label: "Featured" };
+                    return (
+                      <div key={item.id} onClick={() => openItemDetail(item)} className="tap-btn" style={{ flex: "0 0 168px", scrollSnapAlign: "start", background: bg, borderRadius: 18, padding: 12, cursor: "pointer" }}>
+                        <div style={{ position: "relative", width: "100%", height: 100, borderRadius: 12, overflow: "hidden", marginBottom: 8, background: "#fff" }}>
+                          {item.imageUrl ? <img src={item.imageUrl} alt={item.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 30 }}>🍽️</div>}
+                          <span style={{ position: "absolute", top: 6, left: 6, background: "rgba(255,255,255,0.92)", color: "#92400e", fontSize: 9, fontWeight: 800, padding: "2px 7px", borderRadius: 100 }}>{badge.icon} {badge.label}</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                          <VegBadge foodType={item.foodType} />
+                          <div style={{ fontWeight: 700, fontSize: 12.5, color: "#1a1a2e", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.name}</div>
+                        </div>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
+                          <span style={{ fontWeight: 800, fontSize: 14, color: "#1a1a2e" }}>₹{item.price}</span>
+                          <button onClick={(e) => { e.stopPropagation(); playTone(680, 90, "triangle"); addToCart(item.id, 1); }} className="tap-btn" style={{ width: 26, height: 26, borderRadius: "50%", border: "none", background: "#1a1a2e", color: "#fff", fontSize: 15, fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>+</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* ===== POPULAR PICKS (horizontal scroll) ===== */}
             <div style={{ padding: "0 20px 18px" }}>

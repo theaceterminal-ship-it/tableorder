@@ -207,7 +207,7 @@ function FoodTypeToggle({ value, onChange }) {
   );
 }
 
-function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, editFileInputRef, handleImageUpload, categories, saveEdit, cancelEdit, toggleAvailable, toggleFeatured, toggleChefSpecial, toggleHero, startEdit, deleteItem }) {
+function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, editFileInputRef, handleImageUpload, categories, saveEdit, cancelEdit, toggleAvailable, toggleFeatured, toggleChefSpecial, startEdit, deleteItem }) {
   if (isEditing) {
     return (
       <div className="card" style={{ padding: 16, borderRadius: 14, gridColumn: "1 / -1" }}>
@@ -264,7 +264,6 @@ function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, e
           {item.category === BAR_CATEGORY && <span style={{ background: "#7c3aed", color: "#fff", fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100 }}>🍸 BAR</span>}
           {item.chefSpecial && <span style={{ background: "#1a1a2e", color: "#fff", fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100 }}>CHEF'S SPECIAL</span>}
           {item.featured && <span style={{ background: "#e8a33d", color: "#fff", fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100 }}>★ FEATURED</span>}
-          {item.showInHero && <span style={{ background: "#0369a1", color: "#fff", fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100 }}>🎠 HERO #{(item.heroOrder ?? 0) + 1}</span>}
         </div>
         {!item.available && (
           <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -287,7 +286,6 @@ function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, e
           <button onClick={() => toggleAvailable(item)} className="btn btn-sm" style={{ background: item.available ? "var(--success-light, #dcfce7)" : "var(--warning-light, #fef3c7)", color: item.available ? "#166534" : "#92400e", border: "none", flex: 1, minWidth: 90 }}>{item.available ? "In Stock" : "Out"}</button>
           <button onClick={() => toggleFeatured(item)} className="btn btn-sm" style={{ background: item.featured ? "#e8a33d20" : "var(--surface-2, #f3efe6)", color: item.featured ? "#92400e" : "var(--text-secondary, #6b6b7b)", border: "none" }} title="Toggle featured">★</button>
           {!item.isCombo && <button onClick={() => toggleChefSpecial(item)} className="btn btn-sm" style={{ background: item.chefSpecial ? "#1a1a2e" : "var(--surface-2, #f3efe6)", color: item.chefSpecial ? "#fff" : "var(--text-secondary, #6b6b7b)", border: "none" }} title="Toggle chef's special">CS</button>}
-          <button onClick={() => toggleHero(item)} className="btn btn-sm" style={{ background: item.showInHero ? "#0369a1" : "var(--surface-2, #f3efe6)", color: item.showInHero ? "#fff" : "var(--text-secondary, #6b6b7b)", border: "none" }} title="Toggle hero carousel">🎠</button>
           <button onClick={() => startEdit(item)} className="btn btn-sm btn-ghost">Edit</button>
           <button onClick={() => deleteItem(item.id)} className="btn btn-sm btn-ghost" style={{ color: "var(--danger, #dc2626)" }}>Delete</button>
         </div>
@@ -330,8 +328,8 @@ function ReceptionPage() {
   const [newItem, setNewItem] = useState({ name: "", description: "", price: "", category: "", imageUrl: "", chefSpecial: false, foodType: "veg" });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
-  const [billing, setBilling] = useState({ taxPercent: 5, servicePercent: 0, upiId: "" });
-  const [billingForm, setBillingForm] = useState({ taxPercent: 5, servicePercent: 0, upiId: "" });
+  const [billing, setBilling] = useState({ taxPercent: 5, servicePercent: 0, upiId: "", upiSelfPayEnabled: false });
+  const [billingForm, setBillingForm] = useState({ taxPercent: 5, servicePercent: 0, upiId: "", upiSelfPayEnabled: false });
   const [billingSaved, setBillingSaved] = useState(false);
   const [tables, setTables] = useState([]);
   const [floors, setFloors] = useState([]);
@@ -418,13 +416,17 @@ function ReceptionPage() {
   const [posNotes, setPosNotes] = useState("");
   const [posSending, setPosSending] = useState(false);
 
-  // --- NEW: extra settings (bar toggle + badge thresholds + spotlight source) ---
-  const [siteSettings, setSiteSettings] = useState({ hasBar: false, thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50, spotlightMetric: "featured" });
-  const [siteSettingsForm, setSiteSettingsForm] = useState({ hasBar: false, thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50, spotlightMetric: "featured" });
+  // --- NEW: extra settings (bar toggle + badge thresholds) ---
+  const [siteSettings, setSiteSettings] = useState({ hasBar: false, thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50 });
+  const [siteSettingsForm, setSiteSettingsForm] = useState({ hasBar: false, thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50 });
   const [siteSettingsSaved, setSiteSettingsSaved] = useState(false);
 
-  // --- NEW: Hero Carousel manual picker ---
-  const [showManageHero, setShowManageHero] = useState(false);
+  // --- NEW: Offer Carousel (replaces the old auto Hero Carousel) ---
+  const [showManageOffers, setShowManageOffers] = useState(false);
+  const [offerBanners, setOfferBanners] = useState([]);
+  const [newOfferBanner, setNewOfferBanner] = useState({ title: "", imageUrl: "", linkedItemId: "" });
+  const [offerBannerUploading, setOfferBannerUploading] = useState(false);
+  const offerBannerFileInputRef = useRef(null);
 
   const editCategoryFileInputRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -503,10 +505,18 @@ function ReceptionPage() {
     const unsub = onSnapshot(doc(db, "restaurants", restaurantId, "info", "settings"), (snap) => {
       if (snap.exists()) {
         const d = snap.data();
-        const merged = { hasBar: !!d.hasBar, thresholdMostLoved: d.thresholdMostLoved ?? 4.5, thresholdMostOrdered: d.thresholdMostOrdered ?? 100, thresholdMostRated: d.thresholdMostRated ?? 50, spotlightMetric: d.spotlightMetric || "featured" };
+        const merged = { hasBar: !!d.hasBar, thresholdMostLoved: d.thresholdMostLoved ?? 4.5, thresholdMostOrdered: d.thresholdMostOrdered ?? 100, thresholdMostRated: d.thresholdMostRated ?? 50 };
         setSiteSettings(merged); setSiteSettingsForm(merged);
       }
     });
+    return () => unsub();
+  }, [restaurantId]);
+
+  // NEW: Offer Carousel banners, ordered
+  useEffect(() => {
+    if (!restaurantId) return;
+    const q = query(collection(db, "restaurants", restaurantId, "offerBanners"), orderBy("order", "asc"));
+    const unsub = onSnapshot(q, (snap) => setOfferBanners(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
     return () => unsub();
   }, [restaurantId]);
 
@@ -744,6 +754,12 @@ function ReceptionPage() {
     catch (err) { alert("Upload failed: " + err.message); }
     finally { setPromoUploading(false); }
   }
+  async function handleOfferBannerImageUpload(file) {
+    setOfferBannerUploading(true);
+    try { const url = await uploadGuard(file); if (url) setNewOfferBanner((p) => ({ ...p, imageUrl: url })); }
+    catch (err) { alert("Upload failed: " + err.message); }
+    finally { setOfferBannerUploading(false); }
+  }
 
   // === order actions ===
   async function confirmOrder(id) { await updateDoc(doc(db, "restaurants", restaurantId, "orders", id), { status: "confirmed" }); }
@@ -760,6 +776,7 @@ function ReceptionPage() {
       taxPercent: parseFloat(billingForm.taxPercent) || 0,
       servicePercent: parseFloat(billingForm.servicePercent) || 0,
       upiId: (billingForm.upiId || "").trim(),
+      upiSelfPayEnabled: !!billingForm.upiSelfPayEnabled,
     });
     setBillingSaved(true);
     setTimeout(() => setBillingSaved(false), 2000);
@@ -779,7 +796,6 @@ function ReceptionPage() {
       thresholdMostLoved: parseFloat(siteSettingsForm.thresholdMostLoved) || 4.5,
       thresholdMostOrdered: parseInt(siteSettingsForm.thresholdMostOrdered) || 100,
       thresholdMostRated: parseInt(siteSettingsForm.thresholdMostRated) || 50,
-      spotlightMetric: siteSettingsForm.spotlightMetric || "featured",
     }, { merge: true }); // merge: true — this doc also holds googleReviewLink
     setSiteSettingsSaved(true);
     setTimeout(() => setSiteSettingsSaved(false), 2000);
@@ -817,6 +833,10 @@ function ReceptionPage() {
     return [o];
   }
 
+  // NEW: self-pay UPI QR only ever gets generated when the receptionist has
+  // BOTH entered a UPI ID AND explicitly flipped on "Enable customer
+  // self-payment via UPI QR" in Settings → Billing. Just having a UPI ID
+  // saved is not enough on its own.
   async function generateBill(o, withQr = false) {
     const ordersToBill = ordersForBilling(o);
     const rawItems = mergeItemLines(ordersToBill.flatMap((ord) => ord.items));
@@ -828,7 +848,8 @@ function ReceptionPage() {
     const taxAmount = Math.round((discountedSubtotal * (billing.taxPercent || 0)) / 100);
     const serviceAmount = Math.round((discountedSubtotal * (billing.servicePercent || 0)) / 100);
     const grandTotal = discountedSubtotal + taxAmount + serviceAmount;
-    const upiLink = withQr && billing.upiId
+    const selfPayOn = !!billing.upiSelfPayEnabled && !!billing.upiId;
+    const upiLink = withQr && selfPayOn
       ? `upi://pay?pa=${encodeURIComponent(billing.upiId)}&pn=${encodeURIComponent(profile.name || "Restaurant")}&am=${grandTotal}&cu=INR`
       : null;
 
@@ -998,30 +1019,31 @@ function ReceptionPage() {
   async function toggleChefSpecial(item) { await updateDoc(doc(db, "restaurants", restaurantId, "menuItems", item.id), { chefSpecial: !item.chefSpecial }); }
   async function deleteItem(id) { if (!confirm("Delete this item?")) return; await deleteDoc(doc(db, "restaurants", restaurantId, "menuItems", id)); }
 
-  // === NEW: Hero Carousel — manual pick + order (separate from "Featured", which
-  // still uses the existing ★ toggle). Tap the 🎠 button on any item card to add
-  // or remove it from the hero; use the Hero Carousel panel to reorder or remove.
-  async function toggleHeroItem(item) {
-    if (item.showInHero) {
-      await updateDoc(doc(db, "restaurants", restaurantId, "menuItems", item.id), { showInHero: false, heroOrder: null });
-    } else {
-      const maxOrder = menuItems.reduce((max, m) => (m.showInHero && typeof m.heroOrder === "number" ? Math.max(max, m.heroOrder) : max), -1);
-      await updateDoc(doc(db, "restaurants", restaurantId, "menuItems", item.id), { showInHero: true, heroOrder: maxOrder + 1 });
-    }
+  // === NEW: Offer Carousel — reception-curated exclusive deal banners ===
+  async function addOfferBanner() {
+    if (offerBanners.length >= 8) return alert("You can add up to 8 offer banners.");
+    if (!newOfferBanner.title.trim()) return alert("Give the offer a title");
+    if (!newOfferBanner.imageUrl) return alert("Upload a banner image");
+    if (!newOfferBanner.linkedItemId) return alert("Link this offer to a menu item");
+    await addDoc(collection(db, "restaurants", restaurantId, "offerBanners"), {
+      title: newOfferBanner.title.trim(), imageUrl: newOfferBanner.imageUrl, linkedItemId: newOfferBanner.linkedItemId,
+      order: offerBanners.length, createdAt: Date.now(),
+    });
+    setNewOfferBanner({ title: "", imageUrl: "", linkedItemId: "" });
   }
-  async function moveHeroItem(item, direction) {
-    const heroItems = menuItems.filter((m) => m.showInHero).sort((a, b) => (a.heroOrder || 0) - (b.heroOrder || 0));
-    const idx = heroItems.findIndex((m) => m.id === item.id);
+  async function deleteOfferBanner(id) {
+    if (!confirm("Delete this offer banner?")) return;
+    await deleteDoc(doc(db, "restaurants", restaurantId, "offerBanners", id));
+  }
+  async function moveOfferBanner(banner, direction) {
+    const idx = offerBanners.findIndex((b) => b.id === banner.id);
     const swapIdx = direction === "up" ? idx - 1 : idx + 1;
-    if (swapIdx < 0 || swapIdx >= heroItems.length) return;
-    const other = heroItems[swapIdx];
+    if (swapIdx < 0 || swapIdx >= offerBanners.length) return;
+    const other = offerBanners[swapIdx];
     const batch = writeBatch(db);
-    batch.update(doc(db, "restaurants", restaurantId, "menuItems", item.id), { heroOrder: other.heroOrder ?? swapIdx });
-    batch.update(doc(db, "restaurants", restaurantId, "menuItems", other.id), { heroOrder: item.heroOrder ?? idx });
+    batch.update(doc(db, "restaurants", restaurantId, "offerBanners", banner.id), { order: other.order ?? swapIdx });
+    batch.update(doc(db, "restaurants", restaurantId, "offerBanners", other.id), { order: banner.order ?? idx });
     await batch.commit();
-  }
-  async function removeFromHero(item) {
-    await updateDoc(doc(db, "restaurants", restaurantId, "menuItems", item.id), { showInHero: false, heroOrder: null });
   }
 
   // === NEW: Smart Suggestions / Bundle rules ===
@@ -1930,13 +1952,13 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                 {orderFilter === "served" && currentData.map((o) => (
                   <OrderCard key={o.id} order={o}>
                     <button className="btn btn-sm btn-primary" onClick={() => generateBill(o, false)} style={{ flex: 1 }}>Generate Bill</button>
-                    {billing.upiId && <button className="btn btn-sm btn-ghost" onClick={() => generateBill(o, true)} style={{ flex: 1 }}>Bill + QR</button>}
+                    {billing.upiId && billing.upiSelfPayEnabled && <button className="btn btn-sm btn-ghost" onClick={() => generateBill(o, true)} style={{ flex: 1 }}>Bill + QR</button>}
                   </OrderCard>
                 ))}
                 {orderFilter === "billRequested" && currentData.map((o) => (
                   <OrderCard key={o.id} order={o}>
                     <button className="btn btn-sm btn-primary" onClick={() => generateBill(o, false)} style={{ flex: 1 }}>Generate Bill</button>
-                    {billing.upiId && <button className="btn btn-sm btn-ghost" onClick={() => generateBill(o, true)} style={{ flex: 1 }}>Bill + QR</button>}
+                    {billing.upiId && billing.upiSelfPayEnabled && <button className="btn btn-sm btn-ghost" onClick={() => generateBill(o, true)} style={{ flex: 1 }}>Bill + QR</button>}
                   </OrderCard>
                 ))}
                 {orderFilter === "billed" && currentData.map((o) => (
@@ -2130,9 +2152,9 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
           {features.combos && <button className="btn btn-ghost" onClick={() => { setShowAddCombo((s) => !s); setShowAddItem(false); setShowAddCategory(false); setShowImportModal(false); setShowAddBundleRule(false); setShowAddPromo(false); }}>{showAddCombo ? "Close" : "+ Add Combo"}</button>}
           <button className="btn btn-ghost" onClick={() => { setShowAddCategory((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowImportModal(false); setShowAddBundleRule(false); setShowAddPromo(false); }}>{showAddCategory ? "Close" : "+ Add Category"}</button>
           {features.promoBanner && <button className="btn btn-ghost" onClick={() => { setShowAddPromo((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowAddBundleRule(false); }}>{showAddPromo ? "Close" : "+ Add Exclusive Deal"}</button>}
-          {features.smartSuggestions && <button className="btn btn-ghost" onClick={() => { setShowAddBundleRule((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowAddPromo(false); setShowManageHero(false); }}>{showAddBundleRule ? "Close" : "+ Smart Deal"}</button>}
-          <button className="btn btn-ghost" onClick={() => { setShowManageHero((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowAddBundleRule(false); setShowAddPromo(false); }}>{showManageHero ? "Close" : "🎠 Hero Carousel"}</button>
-          <button className="btn btn-primary" onClick={() => { setShowImportModal(true); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowAddBundleRule(false); setShowAddPromo(false); setShowManageHero(false); }}>↑ Import Menu</button>
+          {features.smartSuggestions && <button className="btn btn-ghost" onClick={() => { setShowAddBundleRule((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowAddPromo(false); setShowManageOffers(false); }}>{showAddBundleRule ? "Close" : "+ Smart Deal"}</button>}
+          <button className="btn btn-ghost" onClick={() => { setShowManageOffers((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowAddBundleRule(false); setShowAddPromo(false); }}>{showManageOffers ? "Close" : "🎠 Offer Carousel"}</button>
+          <button className="btn btn-primary" onClick={() => { setShowImportModal(true); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowAddBundleRule(false); setShowAddPromo(false); setShowManageOffers(false); }}>↑ Import Menu</button>
         </div>
       </div>
 
@@ -2158,36 +2180,63 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
         </div>
       )}
 
-      {/* NEW: Hero Carousel — stupidly-simple manual pick + reorder. Tap the 🎠
-          button on any item card (below) to add/remove it from the hero; use the
-          arrows here to reorder. Featured section is unchanged — still the ★ button. */}
-      {showManageHero && (() => {
-        const heroItems = menuItems.filter((m) => m.showInHero).sort((a, b) => (a.heroOrder || 0) - (b.heroOrder || 0));
-        return (
-          <div className="card" style={{ padding: 20, borderRadius: 16, marginBottom: 20, border: "2px dashed #0369a1" }}>
-            <h3 style={{ fontSize: 14.5, fontWeight: 700, marginBottom: 6 }}>🎠 Hero Carousel</h3>
-            <p style={{ fontSize: 12.5, color: "var(--text-secondary, #6b6b7b)", marginBottom: 14 }}>
-              This controls exactly which items scroll in the customer menu's hero banner, and in what order. Tap the 🎠 button on any item card below to add or remove it — reorder with the arrows here.
-            </p>
-            {heroItems.length === 0 ? (
-              <p style={{ fontSize: 13, color: "#999" }}>No items in the hero carousel yet. Tap 🎠 on any item card below to add one.</p>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {heroItems.map((item, i) => (
-                  <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "var(--surface-2, #f3efe6)", borderRadius: 10 }}>
-                    <span style={{ width: 22, height: 22, borderRadius: "50%", background: "#0369a1", color: "#fff", fontSize: 11.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{i + 1}</span>
-                    {item.imageUrl && <img src={item.imageUrl} alt="" style={{ width: 34, height: 34, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />}
-                    <span style={{ fontWeight: 700, fontSize: 13, flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.name}</span>
-                    <button className="btn btn-sm btn-ghost" disabled={i === 0} onClick={() => moveHeroItem(item, "up")} style={{ padding: "4px 10px", opacity: i === 0 ? 0.4 : 1 }}>↑</button>
-                    <button className="btn btn-sm btn-ghost" disabled={i === heroItems.length - 1} onClick={() => moveHeroItem(item, "down")} style={{ padding: "4px 10px", opacity: i === heroItems.length - 1 ? 0.4 : 1 }}>↓</button>
-                    <button className="btn btn-sm btn-ghost" onClick={() => removeFromHero(item)} style={{ padding: "4px 10px", color: "#dc2626" }}>Remove</button>
-                  </div>
-                ))}
-              </div>
-            )}
+      {/* NEW: Offer Carousel — reception-curated exclusive deal banners (up to 8),
+          shown as the top carousel on the customer menu. Each banner is an image
+          + title, linked to a menu item — tapping it in the customer app adds
+          that item straight to the cart. */}
+      {showManageOffers && (
+        <div className="card" style={{ padding: 20, borderRadius: 16, marginBottom: 20, border: "2px dashed #0369a1" }}>
+          <h3 style={{ fontSize: 14.5, fontWeight: 700, marginBottom: 6 }}>🎠 Offer Carousel</h3>
+          <p style={{ fontSize: 12.5, color: "var(--text-secondary, #6b6b7b)", marginBottom: 14 }}>
+            Up to 8 exclusive-deal banners shown at the top of the customer menu. Title and price are overlaid on the photo — tapping a banner adds the linked item straight to the cart. If you add none, this section simply won't show.
+          </p>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 4, marginBottom: 4 }}>
+            <div>
+              <label style={labelStyle}>Offer Title</label>
+              <input placeholder="e.g. Weekend Special — 20% off" value={newOfferBanner.title} onChange={(e) => setNewOfferBanner((p) => ({ ...p, title: e.target.value }))} style={inputStyle} />
+            </div>
+            <div>
+              <label style={labelStyle}>Linked Item</label>
+              <select value={newOfferBanner.linkedItemId} onChange={(e) => setNewOfferBanner((p) => ({ ...p, linkedItemId: e.target.value }))} style={inputStyle}>
+                <option value="">Select item</option>
+                {menuItems.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+              </select>
+            </div>
           </div>
-        );
-      })()}
+          <label style={labelStyle}>Banner Image</label>
+          <input ref={offerBannerFileInputRef} type="file" accept="image/*" onChange={(e) => handleOfferBannerImageUpload(e.target.files[0])} style={{ display: "none" }} />
+          <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 14 }}>
+            <button onClick={() => offerBannerFileInputRef.current?.click()} disabled={offerBannerUploading} className="btn btn-ghost" style={{ border: "2px dashed var(--border, #e6e1d6)" }}>{offerBannerUploading ? "Uploading..." : "Upload Photo"}</button>
+            {newOfferBanner.imageUrl && !offerBannerUploading && <img src={newOfferBanner.imageUrl} alt="" style={{ width: 48, height: 48, borderRadius: 10, objectFit: "cover" }} />}
+          </div>
+          <button className="btn btn-primary" onClick={addOfferBanner} disabled={offerBanners.length >= 8}>{offerBanners.length >= 8 ? "Limit reached (8/8)" : `+ Add Offer (${offerBanners.length}/8)`}</button>
+
+          {offerBanners.length > 0 && (
+            <div style={{ marginTop: 18, borderTop: "1px solid var(--border, #e6e1d6)", paddingTop: 14 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#888", textTransform: "uppercase", marginBottom: 10 }}>Current Offers</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {offerBanners.map((banner, i) => {
+                  const linked = menuItems.find((m) => m.id === banner.linkedItemId);
+                  return (
+                    <div key={banner.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "var(--surface-2, #f3efe6)", borderRadius: 10 }}>
+                      <span style={{ width: 22, height: 22, borderRadius: "50%", background: "#0369a1", color: "#fff", fontSize: 11.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{i + 1}</span>
+                      {banner.imageUrl && <img src={banner.imageUrl} alt="" style={{ width: 34, height: 34, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 700, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{banner.title}</div>
+                        <div style={{ fontSize: 11, color: "#888" }}>{linked ? `→ ${linked.name}` : "No linked item"}</div>
+                      </div>
+                      <button className="btn btn-sm btn-ghost" disabled={i === 0} onClick={() => moveOfferBanner(banner, "up")} style={{ padding: "4px 10px", opacity: i === 0 ? 0.4 : 1 }}>↑</button>
+                      <button className="btn btn-sm btn-ghost" disabled={i === offerBanners.length - 1} onClick={() => moveOfferBanner(banner, "down")} style={{ padding: "4px 10px", opacity: i === offerBanners.length - 1 ? 0.4 : 1 }}>↓</button>
+                      <button className="btn btn-sm btn-ghost" onClick={() => deleteOfferBanner(banner.id)} style={{ padding: "4px 10px", color: "#dc2626" }}>Remove</button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* NEW: Smart Suggestions / Bundle Discount rule builder */}
       {showAddBundleRule && (
@@ -2677,7 +2726,6 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
               toggleAvailable={toggleAvailable}
               toggleFeatured={toggleFeatured}
               toggleChefSpecial={toggleChefSpecial}
-              toggleHero={toggleHeroItem}
               startEdit={startEdit}
               deleteItem={deleteItem}
             />
@@ -2874,15 +2922,8 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
           </div>
         </div>
         <p style={{ fontSize: 11.5, color: "#999", marginTop: 10, marginBottom: 14 }}>
-          These badges are now calculated automatically — Most Ordered from your billed/paid orders, Most Loved and Most Rated from item ratings (once your review flow is writing <code>rating</code>/<code>ratingCount</code> onto menu items). No manual tagging needed.
+          These badges are calculated automatically — Most Ordered from your billed/paid orders, Most Loved and Most Rated from item ratings (once your review flow is writing <code>rating</code>/<code>ratingCount</code> onto menu items). They also drive the "Loved by Everyone" carousel on the customer menu (top 5, colour-coded).
         </p>
-        <label style={labelStyle}>Spotlight Card Shows</label>
-        <select value={siteSettingsForm.spotlightMetric} onChange={(e) => setSiteSettingsForm((p) => ({ ...p, spotlightMetric: e.target.value }))} style={inputStyle}>
-          <option value="featured">Featured item (★ toggle on item cards)</option>
-          <option value="mostLoved">Most Loved item</option>
-          <option value="mostOrdered">Most Ordered item</option>
-          <option value="mostRated">Most Rated item</option>
-        </select>
         <button className="btn btn-primary" onClick={saveSiteSettings} style={{ marginTop: 4 }}>{siteSettingsSaved ? "Saved ✓" : "Save Settings"}</button>
       </div>
 
@@ -2898,6 +2939,13 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
             <>
               <label style={labelStyle}>UPI ID (for payment QR)</label>
               <input placeholder="yourhotel@upi" value={billingForm.upiId || ""} onChange={(e) => setBillingForm((p) => ({ ...p, upiId: e.target.value }))} style={inputStyle} />
+              <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13.5, fontWeight: 600, cursor: "pointer", marginBottom: 16, marginTop: -2 }}>
+                <input type="checkbox" checked={!!billingForm.upiSelfPayEnabled} onChange={(e) => setBillingForm((p) => ({ ...p, upiSelfPayEnabled: e.target.checked }))} />
+                🔗 Enable customer self-payment via UPI QR
+              </label>
+              <p style={{ fontSize: 11.5, color: "#999", marginTop: -10, marginBottom: 14 }}>
+                Off by default. Turn this on and save to make "Bill + QR" available on the dashboard — the QR only reaches the table's bill screen once a receptionist taps it with this enabled.
+              </p>
             </>
           )}
           <button className="btn btn-primary" onClick={saveBilling}>{billingSaved ? "Saved ✓" : "Save Billing Settings"}</button>
