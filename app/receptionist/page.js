@@ -1,31 +1,5 @@
 "use client";
-// REPLACES app/reception/page.js entirely.
-//
-// ALL-IN-ONE UPDATE — everything discussed for the receptionist side, built at once:
-//   1. Category pills: floating ✎ / ✕ removed. Tap "⋯" on a pill to expand an
-//      inline panel below the row (rename, change photo, delete, list items).
-//   2. Smart Suggestions + Bundle Discount rule engine (Menu tab). Receptionist
-//      authors the rules; billing applies them automatically.
-//   3. Call Waiter live feed (Dashboard) — waiterCalls collection, badge, Acknowledge,
-//      auto-clears stale (10 min) calls client-side.
-//   4. Tables tab redesign — QR hidden by default (Print opens a modal), green/red
-//      occupancy color, Merge Tables, Move/Swap an active order to another table.
-//   5. POS tab (new) — table grid + menu browser + cart, Dine-in/Takeaway toggle,
-//      Quick Order (no table), Send to Kitchen, Active Orders list with one-tap actions.
-//   6. Bar Section toggle (Settings) — auto-creates a "Bar" category when enabled.
-//   7. Badge thresholds (Most Loved / Most Ordered / Most Rated) — Settings.
-//   8. Subscription card (Settings) — plan display + Upgrade stub.
-//   9. Promo banner moved out of Settings into the Menu tab ("+ Add Exclusive Deal").
-//
-// Firestore additions this needs (see comments near each listener):
-//   restaurants/{id}/waiterCalls/{callId}      { table, reason, status, createdAt }
-//   restaurants/{id}/bundleRules/{ruleId}      { name, type, requiredItems[], threshold,
-//                                                 freeItemId, discountType, discountValue,
-//                                                 requiredCategories[], active, createdAt }
-//   restaurants/{id}/tables/{tableId}          + mergedGroupId, mergedWith[], isMerged
-//   restaurants/{id}/info/settings             { hasBar, thresholdMostLoved,
-//                                                 thresholdMostOrdered, thresholdMostRated }
-//   orders/{id}                                + orderType: "dinein" | "takeaway"
+
 
 import { useEffect, useState, useRef } from "react";
 import { db } from "@/lib/firebase";
@@ -43,12 +17,25 @@ const DEFAULT_CATEGORIES = ["Starters", "Mains", "Breads & Rice", "Continental",
 const COMBO_CATEGORY = "Combo Packs";
 const BAR_CATEGORY = "Bar";
 const TAKEAWAY_TABLE = "TAKEAWAY";
+const DAY_OPTIONS = [
+  { key: "sun", label: "Sun" }, { key: "mon", label: "Mon" }, { key: "tue", label: "Tue" },
+  { key: "wed", label: "Wed" }, { key: "thu", label: "Thu" }, { key: "fri", label: "Fri" }, { key: "sat", label: "Sat" },
+];
 const WAITER_REASONS = [
   { key: "water", label: "Water", icon: "💧" },
   { key: "tissues", label: "Tissues", icon: "🧻" },
   { key: "cutlery", label: "Cutlery", icon: "🍴" },
   { key: "condiments", label: "Seasoning / Condiments", icon: "🧂" },
   { key: "other", label: "Something else", icon: "✋" },
+];
+
+// NEW: payment methods offered when marking a bill paid — single source of
+// truth so the modal, CSV export, and PDF report all agree on labels.
+const PAYMENT_METHODS = [
+  { key: "cash", label: "Cash", icon: "💵" },
+  { key: "card", label: "Card", icon: "💳" },
+  { key: "upi", label: "UPI", icon: "📱" },
+  { key: "other", label: "Other", icon: "🔖" },
 ];
 
 const ORDER_SECTIONS = [
@@ -102,8 +89,35 @@ function cartSubtotalForCategories(items, menuItems, requiredCategories) {
     return sum;
   }, 0);
 }
+
+// NEW: Buy 1 Get 1 Free — driven purely by item.bogoEnabled, no rule needed to
+// set up. Expands every unit across all BOGO-flagged lines in the cart, sorts
+// high→low, and frees every 2nd unit (the cheaper of each pair). The pricier
+// item in a pair is always what the guest is charged for; an odd unit left
+// over at the end (no pair) is charged in full.
+function computeBogoDiscount(items, menuItems) {
+  const units = [];
+  items.forEach((it) => {
+    const mi = menuItems.find((m) => m.id === (it.itemId || it.id));
+    if (mi?.bogoEnabled) {
+      for (let i = 0; i < it.qty; i++) units.push(it.price);
+    }
+  });
+  if (units.length < 2) return null;
+  units.sort((a, b) => b - a);
+  let amount = 0;
+  for (let i = 1; i < units.length; i += 2) amount += units[i];
+  return amount > 0 ? { name: "🎁 Buy 1 Get 1 Free", amount: Math.round(amount) } : null;
+}
+
 function computeBundleDiscounts(items, menuItems, bundleRules) {
   const discounts = [];
+
+  // BOGO always evaluates first, ahead of manually-configured Smart Deals —
+  // it's driven by the per-item bogoEnabled flag, not a bundleRules entry.
+  const bogo = computeBogoDiscount(items, menuItems);
+  if (bogo) discounts.push(bogo);
+
   const nowRules = (bundleRules || []).filter((r) => r.active);
   for (const rule of nowRules) {
     if (rule.type === "pairDiscount" && Array.isArray(rule.requiredItems) && rule.requiredItems.length >= 1) {
@@ -145,6 +159,9 @@ function computeBundleDiscounts(items, menuItems, bundleRules) {
 const inputStyle = { width: "100%", padding: "11px 14px", border: "1px solid var(--border, #e6e1d6)", borderRadius: 10, fontSize: 14, marginBottom: 12, background: "var(--surface, #ffffff)", fontFamily: "inherit", boxSizing: "border-box" };
 const labelStyle = { fontSize: 12, color: "var(--text-secondary, #6b6b7b)", fontWeight: 700, display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 };
 const glassCard = { background: "rgba(255,255,255,0.55)", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", border: "1px solid rgba(255,255,255,0.5)" };
+// NEW: shared centered-modal styles for the customer-details / payment-method popups
+const modalOverlayStyle = { position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 400, display: "flex", alignItems: "center", justifyContent: "center" };
+const modalBoxStyle = { background: "var(--surface, #fff)", borderRadius: 20, padding: 28, maxWidth: 360, width: "90%" };
 
 // === shared components — MUST live at module scope ===
 function StatCard({ label, value, color, sub, onClick }) {
@@ -207,6 +224,60 @@ function FoodTypeToggle({ value, onChange }) {
   );
 }
 
+// === NEW: Size Variations & Add-ons editor — shared between "Add New Item"
+// and the inline item-edit form. Lets reception collapse duplicate menu items
+// (e.g. "Pizza Regular" / "Pizza Medium" / "Pizza Large") into ONE item with
+// size options, plus optional extra add-ons (toppings, extra cheese, etc.)
+// that customers can tick when adding it to their cart.
+function addRow(setFn, key) {
+  setFn((p) => ({ ...p, [key]: [...(p[key] || []), { id: `${key.slice(0, 3)}${Date.now()}${Math.random().toString(36).slice(2, 6)}`, name: "", price: "" }] }));
+}
+function updateRow(setFn, key, id, field, value) {
+  setFn((p) => ({ ...p, [key]: (p[key] || []).map((r) => (r.id === id ? { ...r, [field]: value } : r)) }));
+}
+function removeRow(setFn, key, id) {
+  setFn((p) => ({ ...p, [key]: (p[key] || []).filter((r) => r.id !== id) }));
+}
+function cleanRows(list) {
+  return (list || []).filter((r) => r.name?.trim() && r.price !== "").map((r) => ({ id: r.id, name: r.name.trim(), price: parseFloat(r.price) || 0 }));
+}
+
+function VariationsAddonsEditor({ form, setForm }) {
+  const variations = form.variations || [];
+  const addons = form.addons || [];
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <label style={labelStyle}>Size / Variations (optional)</label>
+        <button type="button" onClick={() => addRow(setForm, "variations")} className="btn btn-sm btn-ghost">+ Add Size</button>
+      </div>
+      {variations.length === 0 ? (
+        <p style={{ fontSize: 11.5, color: "#999", marginTop: -6, marginBottom: 10 }}>No sizes — item sells at the single price above. Add sizes (e.g. Regular / Medium / Large) instead of creating separate duplicate menu items.</p>
+      ) : variations.map((v) => (
+        <div key={v.id} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+          <input placeholder="e.g. Medium" value={v.name} onChange={(e) => updateRow(setForm, "variations", v.id, "name", e.target.value)} style={{ ...inputStyle, marginBottom: 0, flex: 2 }} />
+          <input placeholder="Price" type="number" value={v.price} onChange={(e) => updateRow(setForm, "variations", v.id, "price", e.target.value)} style={{ ...inputStyle, marginBottom: 0, flex: 1 }} />
+          <button type="button" onClick={() => removeRow(setForm, "variations", v.id)} style={{ background: "none", border: "none", color: "#dc2626", cursor: "pointer", fontSize: 16 }}>✕</button>
+        </div>
+      ))}
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "14px 0 8px" }}>
+        <label style={labelStyle}>Extra Add-ons / Toppings (optional)</label>
+        <button type="button" onClick={() => addRow(setForm, "addons")} className="btn btn-sm btn-ghost">+ Add Add-on</button>
+      </div>
+      {addons.length === 0 ? (
+        <p style={{ fontSize: 11.5, color: "#999", marginTop: -6 }}>e.g. Extra Cheese, Extra Topping, Extra Raita — shown to customers as optional add-ons with their own price when they add this item.</p>
+      ) : addons.map((a) => (
+        <div key={a.id} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+          <input placeholder="e.g. Extra Cheese" value={a.name} onChange={(e) => updateRow(setForm, "addons", a.id, "name", e.target.value)} style={{ ...inputStyle, marginBottom: 0, flex: 2 }} />
+          <input placeholder="Price" type="number" value={a.price} onChange={(e) => updateRow(setForm, "addons", a.id, "price", e.target.value)} style={{ ...inputStyle, marginBottom: 0, flex: 1 }} />
+          <button type="button" onClick={() => removeRow(setForm, "addons", a.id)} style={{ background: "none", border: "none", color: "#dc2626", cursor: "pointer", fontSize: 16 }}>✕</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, editFileInputRef, handleImageUpload, categories, saveEdit, cancelEdit, toggleAvailable, toggleFeatured, toggleChefSpecial, startEdit, deleteItem }) {
   if (isEditing) {
     return (
@@ -239,12 +310,16 @@ function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, e
         <input value={editForm.description} onChange={(e) => setEditForm((p) => ({ ...p, description: e.target.value }))} style={inputStyle} />
         <label style={labelStyle}>Food Type</label>
         <FoodTypeToggle value={editForm.foodType || "veg"} onChange={(v) => setEditForm((p) => ({ ...p, foodType: v }))} />
-        <div style={{ display: "flex", gap: 16, marginBottom: 12 }}>
+        <VariationsAddonsEditor form={editForm} setForm={setEditForm} />
+        <div style={{ display: "flex", gap: 16, marginBottom: 12, flexWrap: "wrap" }}>
           <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
             <input type="checkbox" checked={!!editForm.featured} onChange={(e) => setEditForm((p) => ({ ...p, featured: e.target.checked }))} /> Featured
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
             <input type="checkbox" checked={!!editForm.chefSpecial} onChange={(e) => setEditForm((p) => ({ ...p, chefSpecial: e.target.checked }))} /> Chef's Special
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+            <input type="checkbox" checked={!!editForm.bogoEnabled} onChange={(e) => setEditForm((p) => ({ ...p, bogoEnabled: e.target.checked }))} /> 🎁 Buy 1 Get 1 Free
           </label>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -264,6 +339,9 @@ function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, e
           {item.category === BAR_CATEGORY && <span style={{ background: "#7c3aed", color: "#fff", fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100 }}>🍸 BAR</span>}
           {item.chefSpecial && <span style={{ background: "#1a1a2e", color: "#fff", fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100 }}>CHEF'S SPECIAL</span>}
           {item.featured && <span style={{ background: "#e8a33d", color: "#fff", fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100 }}>★ FEATURED</span>}
+          {item.bogoEnabled && <span style={{ background: "#16a34a", color: "#fff", fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100 }}>🎁 BOGO</span>}
+          {item.variations?.length > 0 && <span style={{ background: "#0369a1", color: "#fff", fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100 }}>{item.variations.length} SIZES</span>}
+          {item.addons?.length > 0 && <span style={{ background: "#166534", color: "#fff", fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100 }}>+{item.addons.length} ADD-ONS</span>}
         </div>
         {!item.available && (
           <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -279,7 +357,9 @@ function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, e
             </span>
             <div style={{ fontWeight: 700, fontSize: 15 }}>{item.name}</div>
           </div>
-          <div style={{ fontWeight: 800, fontSize: 15, color: "#e8a33d", whiteSpace: "nowrap" }}>₹{item.price}</div>
+          <div style={{ fontWeight: 800, fontSize: 15, color: "#e8a33d", whiteSpace: "nowrap" }}>
+            {item.variations?.length > 0 ? `From ₹${Math.min(...item.variations.map((v) => v.price))}` : `₹${item.price}`}
+          </div>
         </div>
         {item.description && <div style={{ fontSize: 12.5, color: "var(--text-secondary, #6b6b7b)", marginTop: 4, flex: 1 }}>{item.description}</div>}
         <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
@@ -310,6 +390,7 @@ function ReceptionPage() {
     { id: "pos", label: "POS" },
     { id: "menu", label: "Menu" },
     { id: "tables", label: "Tables" },
+    { id: "crm", label: "CRM" },
     { id: "settings", label: "Settings" },
   ];
 
@@ -325,7 +406,7 @@ function ReceptionPage() {
   const [savedMsg, setSavedMsg] = useState(false);
   const [editingProfile, setEditingProfile] = useState(false); // profile card starts collapsed; opens on "Edit Profile"
   const [menuItems, setMenuItems] = useState([]);
-  const [newItem, setNewItem] = useState({ name: "", description: "", price: "", category: "", imageUrl: "", chefSpecial: false, foodType: "veg" });
+  const [newItem, setNewItem] = useState({ name: "", description: "", price: "", category: "", imageUrl: "", chefSpecial: false, foodType: "veg", variations: [], addons: [], bogoEnabled: false });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [billing, setBilling] = useState({ taxPercent: 5, servicePercent: 0, upiId: "", upiSelfPayEnabled: false });
@@ -360,11 +441,6 @@ function ReceptionPage() {
   const [showAddCombo, setShowAddCombo] = useState(false);
   const [newCombo, setNewCombo] = useState({ name: "", description: "", price: "", imageUrl: "", featured: false });
   const [comboUploading, setComboUploading] = useState(false);
-  const [promoBanner, setPromoBanner] = useState({ imageUrl: "", title: "", linkedItemId: "" });
-  const [promoForm, setPromoForm] = useState({ imageUrl: "", title: "", linkedItemId: "" });
-  const [promoUploading, setPromoUploading] = useState(false);
-  const [promoSaved, setPromoSaved] = useState(false);
-  const [showAddPromo, setShowAddPromo] = useState(false); // NEW: promo now lives in Menu tab
   const [splitBillOrder, setSplitBillOrder] = useState(null);
   const [splitCount, setSplitCount] = useState(2);
   const [showSplash, setShowSplash] = useState(false);
@@ -424,9 +500,17 @@ function ReceptionPage() {
   // --- NEW: Offer Carousel (replaces the old auto Hero Carousel) ---
   const [showManageOffers, setShowManageOffers] = useState(false);
   const [offerBanners, setOfferBanners] = useState([]);
-  const [newOfferBanner, setNewOfferBanner] = useState({ title: "", imageUrl: "", linkedItemId: "" });
+  const [newOfferBanner, setNewOfferBanner] = useState({ title: "", imageUrl: "", linkedItemId: "", discountPercent: "", days: [] });
   const [offerBannerUploading, setOfferBannerUploading] = useState(false);
   const offerBannerFileInputRef = useRef(null);
+
+  // --- NEW: optional customer capture at bill time + payment method picker ---
+  const [billCustomerOrder, setBillCustomerOrder] = useState(null); // { order, withQr }
+  const [billCustomerForm, setBillCustomerForm] = useState({ name: "", phone: "" });
+  const [paymentMethodOrder, setPaymentMethodOrder] = useState(null); // order pending a payment-method choice
+
+  // --- NEW: CRM — customers collection, keyed by phone ---
+  const [customers, setCustomers] = useState([]);
 
   const editCategoryFileInputRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -434,7 +518,6 @@ function ReceptionPage() {
   const logoFileInputRef = useRef(null);
   const categoryFileInputRef = useRef(null);
   const comboFileInputRef = useRef(null);
-  const promoFileInputRef = useRef(null);
   const seededCategories = useRef(false);
 
   // Staff
@@ -491,14 +574,6 @@ function ReceptionPage() {
     return () => unsub();
   }, [restaurantId]);
 
-  useEffect(() => {
-    if (!restaurantId) return;
-    const unsub = onSnapshot(doc(db, "restaurants", restaurantId, "info", "promoBanner"), (snap) => {
-      if (snap.exists()) { setPromoBanner(snap.data()); setPromoForm(snap.data()); }
-    });
-    return () => unsub();
-  }, [restaurantId]);
-
   // NEW: bar toggle + badge thresholds
   useEffect(() => {
     if (!restaurantId) return;
@@ -524,6 +599,14 @@ function ReceptionPage() {
     if (!restaurantId) return;
     const q = query(collection(db, "restaurants", restaurantId, "menuItems"), orderBy("createdAt", "asc"));
     const unsub = onSnapshot(q, (snap) => setMenuItems(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
+    return () => unsub();
+  }, [restaurantId]);
+
+  // NEW: CRM customers, live, most recently seen first
+  useEffect(() => {
+    if (!restaurantId) return;
+    const q = query(collection(db, "restaurants", restaurantId, "customers"), orderBy("lastSeen", "desc"));
+    const unsub = onSnapshot(q, (snap) => setCustomers(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
     return () => unsub();
   }, [restaurantId]);
 
@@ -748,12 +831,6 @@ function ReceptionPage() {
     catch (err) { alert("Upload failed: " + err.message); }
     finally { setComboUploading(false); }
   }
-  async function handlePromoImageUpload(file) {
-    setPromoUploading(true);
-    try { const url = await uploadGuard(file); if (url) setPromoForm((p) => ({ ...p, imageUrl: url })); }
-    catch (err) { alert("Upload failed: " + err.message); }
-    finally { setPromoUploading(false); }
-  }
   async function handleOfferBannerImageUpload(file) {
     setOfferBannerUploading(true);
     try { const url = await uploadGuard(file); if (url) setNewOfferBanner((p) => ({ ...p, imageUrl: url })); }
@@ -780,15 +857,6 @@ function ReceptionPage() {
     });
     setBillingSaved(true);
     setTimeout(() => setBillingSaved(false), 2000);
-  }
-  async function savePromoBanner() {
-    await setDoc(doc(db, "restaurants", restaurantId, "info", "promoBanner"), {
-      imageUrl: promoForm.imageUrl || "",
-      title: promoForm.title || "",
-      linkedItemId: promoForm.linkedItemId || "",
-    });
-    setPromoSaved(true);
-    setTimeout(() => setPromoSaved(false), 2000);
   }
   async function saveSiteSettings() {
     await setDoc(doc(db, "restaurants", restaurantId, "info", "settings"), {
@@ -837,7 +905,11 @@ function ReceptionPage() {
   // BOTH entered a UPI ID AND explicitly flipped on "Enable customer
   // self-payment via UPI QR" in Settings → Billing. Just having a UPI ID
   // saved is not enough on its own.
-  async function generateBill(o, withQr = false) {
+  //
+  // NEW: accepts an optional customerInfo ({ name, phone }) captured via the
+  // billCustomerModal — both fields are optional, and if either is given the
+  // customer is upserted into the CRM collection with this bill's total.
+  async function generateBill(o, withQr = false, customerInfo = null) {
     const ordersToBill = ordersForBilling(o);
     const rawItems = mergeItemLines(ordersToBill.flatMap((ord) => ord.items));
     const items = normalizedItems(rawItems);
@@ -853,6 +925,9 @@ function ReceptionPage() {
       ? `upi://pay?pa=${encodeURIComponent(billing.upiId)}&pn=${encodeURIComponent(profile.name || "Restaurant")}&am=${grandTotal}&cu=INR`
       : null;
 
+    const customerName = (customerInfo?.name || "").trim();
+    const customerPhone = (customerInfo?.phone || "").trim();
+
     const billPayload = {
       status: "billed", items: rawItems, billSubtotal: subtotal, billDiscounts: bundleDiscounts, billDiscountTotal: discountTotal,
       billTaxPercent: billing.taxPercent || 0, billTaxAmount: taxAmount,
@@ -860,6 +935,8 @@ function ReceptionPage() {
       paymentQrUrl: upiLink ? `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(upiLink)}` : null,
       upiPayLink: upiLink || null,
       mergedTables: ordersToBill.length > 1 ? ordersToBill.map((ord) => ord.table) : null,
+      customerName: customerName || null,
+      customerPhone: customerPhone || null,
     };
     // Every order in the group gets the SAME consolidated bill written onto it —
     // that way each table's own device (each listens only to its own table number)
@@ -868,9 +945,51 @@ function ReceptionPage() {
     const batch = writeBatch(db);
     ordersToBill.forEach((ord) => batch.update(doc(db, "restaurants", restaurantId, "orders", ord.id), billPayload));
     await batch.commit();
+
+    if (customerName || customerPhone) {
+      await upsertCustomer(customerName, customerPhone, grandTotal);
+    }
   }
 
-  async function markPaid(id) {
+  // NEW: CRM — upsert a customer record keyed by phone (falls back to a
+  // name-only bucket if no phone was given, though phone is what makes
+  // repeat-visit tracking reliable across separate bills/visits).
+  async function upsertCustomer(name, phone, amountSpent) {
+    const phoneKey = (phone || "").replace(/[^0-9]/g, "");
+    if (!phoneKey && !name) return;
+    const docId = phoneKey || `name-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+    try {
+      const ref = doc(db, "restaurants", restaurantId, "customers", docId);
+      const existing = await getDoc(ref);
+      if (existing.exists()) {
+        const d = existing.data();
+        await updateDoc(ref, {
+          name: name || d.name || "",
+          phone: phoneKey || d.phone || "",
+          orderCount: (d.orderCount || 0) + 1,
+          totalSpent: (d.totalSpent || 0) + (amountSpent || 0),
+          lastSeen: Date.now(),
+        });
+      } else {
+        await setDoc(ref, {
+          name: name || "", phone: phoneKey || "", orderCount: 1, totalSpent: amountSpent || 0,
+          firstSeen: Date.now(), lastSeen: Date.now(),
+        });
+      }
+    } catch (err) {
+      console.error("CRM upsert failed:", err.message);
+    }
+  }
+
+  // NEW: opens the optional customer-details modal before actually generating
+  // the bill. "Skip & Generate" still generates the bill immediately, just
+  // without any CRM data attached to it.
+  function openGenerateBill(o, withQr) {
+    setBillCustomerForm({ name: "", phone: "" });
+    setBillCustomerOrder({ order: o, withQr });
+  }
+
+  async function markPaid(id, method = "cash") {
     const order = orders.find((o) => o.id === id);
     if (!order) return;
     const t = tables.find((tb) => tb.number === order.table);
@@ -882,12 +1001,20 @@ function ReceptionPage() {
       const siblingBilled = orders.filter((o) => o.status === "billed" && groupTableNumbers.includes(o.table));
       const groupTables = tables.filter((tb) => tb.mergedGroupId === t.mergedGroupId);
       const batch = writeBatch(db);
-      siblingBilled.forEach((o) => batch.update(doc(db, "restaurants", restaurantId, "orders", o.id), { status: "paid" }));
+      siblingBilled.forEach((o) => batch.update(doc(db, "restaurants", restaurantId, "orders", o.id), { status: "paid", paymentMethod: method }));
       groupTables.forEach((tb) => batch.update(doc(db, "restaurants", restaurantId, "tables", tb.id), { mergedGroupId: null, mergedWith: [], isMerged: false }));
       await batch.commit();
       return;
     }
-    await updateDoc(doc(db, "restaurants", restaurantId, "orders", id), { status: "paid" });
+    await updateDoc(doc(db, "restaurants", restaurantId, "orders", id), { status: "paid", paymentMethod: method });
+  }
+
+  // NEW: opens the payment-method picker before finalizing Mark Paid.
+  function openMarkPaid(order) { setPaymentMethodOrder(order); }
+  async function confirmMarkPaid(method) {
+    if (!paymentMethodOrder) return;
+    await markPaid(paymentMethodOrder.id, method);
+    setPaymentMethodOrder(null);
   }
 
   function printBill(o) {
@@ -901,6 +1028,7 @@ function ReceptionPage() {
           <span>${d.name}</span><span>-Rs.${d.amount}</span>
         </div>`).join("");
     const qrHtml = o.paymentQrUrl ? `<div style="text-align:center;margin-top:16px;"><img src="${o.paymentQrUrl}" style="width:160px;" /><div style="font-size:11px;color:#888;margin-top:6px;">Scan to pay via UPI</div></div>` : "";
+    const customerHtml = (o.customerName || o.customerPhone) ? `<div class="sub">👤 ${o.customerName || ""} ${o.customerPhone || ""}</div>` : "";
     const html = `
       <html><head><title>Bill - Table ${o.table}</title>
         <style>
@@ -917,6 +1045,7 @@ function ReceptionPage() {
         <h2>${profile?.name || "Table Order"}</h2>
         <div class="sub">${profile?.tagline || ""}</div>
         <div class="sub">Table ${o.table} - ${new Date(o.createdAt).toLocaleString()}</div>
+        ${customerHtml}
         <div class="line"></div>
         ${itemsHtml}
         <div class="line"></div>
@@ -991,9 +1120,11 @@ function ReceptionPage() {
     await addDoc(collection(db, "restaurants", restaurantId, "menuItems"), {
       name: newItem.name, description: newItem.description, price: parseFloat(newItem.price), category: newItem.category,
       imageUrl: newItem.imageUrl, available: true, featured: false, chefSpecial: !!newItem.chefSpecial,
-      foodType: newItem.foodType, isCombo: false, createdAt: Date.now(),
+      foodType: newItem.foodType, isCombo: false, bogoEnabled: !!newItem.bogoEnabled,
+      variations: cleanRows(newItem.variations), addons: cleanRows(newItem.addons),
+      createdAt: Date.now(),
     });
-    setNewItem({ name: "", description: "", price: "", category: newItem.category, imageUrl: "", chefSpecial: false, foodType: "veg" });
+    setNewItem({ name: "", description: "", price: "", category: newItem.category, imageUrl: "", chefSpecial: false, foodType: "veg", variations: [], addons: [], bogoEnabled: false });
   }
   async function addCombo() {
     if (!newCombo.name || !newCombo.price) return alert("Combo name and price are required");
@@ -1005,12 +1136,13 @@ function ReceptionPage() {
     setNewCombo({ name: "", description: "", price: "", imageUrl: "", featured: false });
     setShowAddCombo(false);
   }
-  function startEdit(item) { setEditingId(item.id); setEditForm(item); }
+  function startEdit(item) { setEditingId(item.id); setEditForm({ variations: [], addons: [], ...item }); }
   async function saveEdit() {
     await updateDoc(doc(db, "restaurants", restaurantId, "menuItems", editingId), {
       name: editForm.name, description: editForm.description, price: parseFloat(editForm.price), category: editForm.category,
       imageUrl: editForm.imageUrl, featured: editForm.featured ?? false, chefSpecial: editForm.chefSpecial ?? false,
-      foodType: editForm.foodType || "veg",
+      foodType: editForm.foodType || "veg", bogoEnabled: editForm.bogoEnabled ?? false,
+      variations: cleanRows(editForm.variations), addons: cleanRows(editForm.addons),
     });
     setEditingId(null);
   }
@@ -1025,11 +1157,20 @@ function ReceptionPage() {
     if (!newOfferBanner.title.trim()) return alert("Give the offer a title");
     if (!newOfferBanner.imageUrl) return alert("Upload a banner image");
     if (!newOfferBanner.linkedItemId) return alert("Link this offer to a menu item");
-    await addDoc(collection(db, "restaurants", restaurantId, "offerBanners"), {
-      title: newOfferBanner.title.trim(), imageUrl: newOfferBanner.imageUrl, linkedItemId: newOfferBanner.linkedItemId,
-      order: offerBanners.length, createdAt: Date.now(),
-    });
-    setNewOfferBanner({ title: "", imageUrl: "", linkedItemId: "" });
+    try {
+      await addDoc(collection(db, "restaurants", restaurantId, "offerBanners"), {
+        title: newOfferBanner.title.trim(), imageUrl: newOfferBanner.imageUrl, linkedItemId: newOfferBanner.linkedItemId,
+        discountPercent: parseFloat(newOfferBanner.discountPercent) || 0,
+        days: newOfferBanner.days || [],
+        order: offerBanners.length, createdAt: Date.now(),
+      });
+      setNewOfferBanner({ title: "", imageUrl: "", linkedItemId: "", discountPercent: "", days: [] });
+    } catch (err) {
+      // Most commonly this is a Firestore security-rules gap: offerBanners is a
+      // new collection and needs the same reception write-access rule your other
+      // collections (e.g. menuItems, bundleRules) already have.
+      alert("Couldn't save the offer: " + err.message);
+    }
   }
   async function deleteOfferBanner(id) {
     if (!confirm("Delete this offer banner?")) return;
@@ -1667,6 +1808,123 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     return { totalSales, orderCount, avg, hourBuckets, peakHour, topItems, inRange };
   }
 
+  // === NEW: Daily Report export (CSV + printable PDF) ===
+  function buildTodayReportData() {
+    const todays = orders.filter((o) => isToday(o.createdAt));
+    const billedToday = todays.filter((o) => o.status === "billed" || o.status === "paid");
+    const totalSales = billedToday.reduce((s, o) => s + (o.billTotal || 0), 0);
+    const totalDiscounts = billedToday.reduce((s, o) => s + (o.billDiscountTotal || (o.billDiscounts || []).reduce((x, d) => x + d.amount, 0)), 0);
+    const totalTax = billedToday.reduce((s, o) => s + (o.billTaxAmount || 0), 0);
+    const totalService = billedToday.reduce((s, o) => s + (o.billServiceAmount || 0), 0);
+    const itemCounts = {};
+    todays.forEach((o) => (o.items || []).forEach((it) => { itemCounts[it.name] = (itemCounts[it.name] || 0) + it.qty; }));
+    const topItems = Object.entries(itemCounts).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    const hourBuckets = Array(24).fill(0);
+    todays.forEach((o) => hourBuckets[new Date(o.createdAt).getHours()]++);
+    const peakHour = hourBuckets.indexOf(Math.max(...hourBuckets));
+    const paymentBreakdown = {};
+    billedToday.filter((o) => o.status === "paid").forEach((o) => {
+      const m = o.paymentMethod || "unspecified";
+      paymentBreakdown[m] = (paymentBreakdown[m] || 0) + (o.billTotal || 0);
+    });
+    return { todays, billedToday, totalSales, totalDiscounts, totalTax, totalService, topItems, peakHour, paymentBreakdown, avgOrderValue: billedToday.length ? Math.round(totalSales / billedToday.length) : 0 };
+  }
+
+  function exportTodayCSV() {
+    const d = buildTodayReportData();
+    const rows = [
+      ["Daily Report", profile?.name || "", new Date().toLocaleDateString()], [],
+      ["SUMMARY"],
+      ["Total Sales", d.totalSales], ["Orders Billed", d.billedToday.length],
+      ["Avg Order Value", d.avgOrderValue], ["Total Discounts Given", d.totalDiscounts],
+      ["Total Tax Collected", d.totalTax], ["Total Service Charge", d.totalService],
+      ["Peak Hour", `${d.peakHour}:00`], [],
+      ["PAYMENT METHOD BREAKDOWN", "Amount"],
+      ...Object.entries(d.paymentBreakdown), [],
+      ["TOP ITEMS", "Qty Sold"], ...d.topItems, [],
+      ["ORDER LOG"],
+      ["Table", "Time", "Status", "Items", "Customer", "Phone", "Payment", "Subtotal", "Discounts", "Tax", "Service", "Total"],
+      ...d.todays.map((o) => [
+        o.table, new Date(o.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        o.status, (o.items || []).map((it) => `${it.name} x${it.qty}`).join("; "),
+        o.customerName || "", o.customerPhone || "", o.paymentMethod || "",
+        o.billSubtotal || "", o.billDiscountTotal || 0, o.billTaxAmount || 0, o.billServiceAmount || 0, o.billTotal || "",
+      ]),
+    ];
+    const csv = rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `daily-report-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function printTodayReport() {
+    const d = buildTodayReportData();
+    const topItemsHtml = d.topItems.map(([name, qty], i) => `<tr><td>${i + 1}</td><td>${name}</td><td style="text-align:right">${qty}</td></tr>`).join("");
+    const paymentHtml = Object.entries(d.paymentBreakdown).map(([m, amt]) => `<tr><td style="text-transform:capitalize">${m}</td><td style="text-align:right">₹${amt.toLocaleString()}</td></tr>`).join("");
+    const ordersHtml = d.todays.map((o) => `
+      <tr><td>${o.table}</td><td>${new Date(o.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+      <td>${o.status.replace("_", " ")}</td><td>${(o.items || []).map((it) => `${it.name} x${it.qty}`).join(", ")}</td>
+      <td>${o.customerName || o.customerPhone ? `${o.customerName || ""} ${o.customerPhone || ""}` : "-"}</td>
+      <td style="text-transform:capitalize">${o.paymentMethod || "-"}</td>
+      <td style="text-align:right">${o.billTotal ? "₹" + o.billTotal : "-"}</td></tr>`).join("");
+    const html = `<html><head><title>Daily Report — ${new Date().toLocaleDateString()}</title>
+      <style>
+        body{font-family:'Inter',sans-serif;max-width:820px;margin:24px auto;color:#1a1a2e;}
+        h1{font-size:22px;margin-bottom:2px;} .sub{color:#888;font-size:12px;margin-bottom:20px;}
+        .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:24px;}
+        .stat{background:#fff7e6;border:1px solid #fde68a;border-radius:10px;padding:12px;}
+        .stat .label{font-size:11px;color:#92400e;text-transform:uppercase;font-weight:700;}
+        .stat .value{font-size:20px;font-weight:800;margin-top:4px;}
+        table{width:100%;border-collapse:collapse;margin-bottom:24px;font-size:12px;}
+        th,td{border-bottom:1px solid #eee;padding:6px 8px;text-align:left;} th{background:#f8f6f3;}
+        h3{font-size:14px;margin:18px 0 8px;}
+        .cols{display:grid;grid-template-columns:1fr 1fr;gap:24px;}
+      </style></head><body>
+      <h1>${profile?.name || "Restaurant"} — Daily Report</h1>
+      <div class="sub">${new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" })}</div>
+      <div class="stats">
+        <div class="stat"><div class="label">Total Sales</div><div class="value">₹${d.totalSales.toLocaleString()}</div></div>
+        <div class="stat"><div class="label">Orders Billed</div><div class="value">${d.billedToday.length}</div></div>
+        <div class="stat"><div class="label">Avg Order Value</div><div class="value">₹${d.avgOrderValue}</div></div>
+        <div class="stat"><div class="label">Discounts Given</div><div class="value">₹${d.totalDiscounts.toLocaleString()}</div></div>
+        <div class="stat"><div class="label">Tax Collected</div><div class="value">₹${d.totalTax.toLocaleString()}</div></div>
+        <div class="stat"><div class="label">Peak Hour</div><div class="value">${d.peakHour}:00</div></div>
+      </div>
+      <div class="cols">
+        <div><h3>Top Selling Items</h3>
+        <table><thead><tr><th>#</th><th>Item</th><th style="text-align:right">Qty</th></tr></thead><tbody>${topItemsHtml || "<tr><td colspan=3>No sales yet</td></tr>"}</tbody></table></div>
+        <div><h3>Payment Methods</h3>
+        <table><thead><tr><th>Method</th><th style="text-align:right">Amount</th></tr></thead><tbody>${paymentHtml || "<tr><td colspan=2>No paid orders yet</td></tr>"}</tbody></table></div>
+      </div>
+      <h3>Order Log</h3>
+      <table><thead><tr><th>Table</th><th>Time</th><th>Status</th><th>Items</th><th>Customer</th><th>Payment</th><th style="text-align:right">Total</th></tr></thead><tbody>${ordersHtml}</tbody></table>
+      <script>window.onload=()=>window.print();</script></body></html>`;
+    const win = window.open("", "_blank", "width=900,height=900");
+    win.document.write(html); win.document.close();
+  }
+
+  // === NEW: CRM export ===
+  function exportCRMCSV() {
+    const rows = [
+      ["CRM Report", profile?.name || "", new Date().toLocaleDateString()], [],
+      ["Name", "Phone", "Orders", "Total Spent", "First Seen", "Last Seen", "Type"],
+      ...customers.map((c) => [
+        c.name || "", c.phone || "", c.orderCount || 0, c.totalSpent || 0,
+        c.firstSeen ? new Date(c.firstSeen).toLocaleDateString() : "",
+        c.lastSeen ? new Date(c.lastSeen).toLocaleDateString() : "",
+        (c.orderCount || 0) > 1 ? "Repeat" : "New",
+      ]),
+    ];
+    const csv = rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `crm-report-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
   function renderAnalyticsFilterBar() {
     const opts = [["today", "Today"], ["3days", "Last 3 Days"], ["week", "Last Week"], ["month", "Last Month"]];
     return (
@@ -1687,7 +1945,13 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     return (
       <div>
         <button onClick={() => setDashboardView("main")} style={{ background: "none", border: "none", color: "#888", cursor: "pointer", fontSize: 13, fontWeight: 600, marginBottom: 16 }}>← Back to dashboard</button>
-        <h2 style={{ fontSize: 22, fontWeight: 800, marginBottom: 16 }}>Sales Analytics</h2>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
+          <h2 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>Sales Analytics</h2>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn btn-ghost" onClick={exportTodayCSV}>⬇ Export Today (CSV / Excel)</button>
+            <button className="btn btn-primary" onClick={printTodayReport}>🖨 Print / Save PDF</button>
+          </div>
+        </div>
         {renderAnalyticsFilterBar()}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px,1fr))", gap: 14, marginBottom: 28 }}>
           <StatCard label="Total Sales" value={`₹${a.totalSales.toLocaleString()}`} color="#16a34a" />
@@ -1780,6 +2044,68 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
       </div>
     );
   }
+
+  // === NEW: RENDER CRM ===
+  const renderCRM = () => {
+    const repeatCustomers = customers.filter((c) => (c.orderCount || 0) > 1);
+    const newToday = customers.filter((c) => c.firstSeen && isToday(c.firstSeen));
+    const sorted = [...customers].sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+    return (
+      <div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
+          <div>
+            <h2 style={{ fontSize: 24, fontWeight: 800, margin: 0, fontFamily: "'Fraunces', serif" }}>Customers (CRM)</h2>
+            <p style={{ fontSize: 13, color: "var(--text-secondary, #6b6b7b)", margin: "4px 0 0" }}>Built automatically from names/phones entered while generating bills.</p>
+          </div>
+          <button className="btn btn-primary" onClick={exportCRMCSV} disabled={customers.length === 0}>⬇ Export CRM Report</button>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 14, marginBottom: 24 }}>
+          <StatCard label="Total Customers" value={customers.length} color="#3b82f6" />
+          <StatCard label="Repeat Customers" value={repeatCustomers.length} color="#16a34a" sub={customers.length ? `${Math.round((repeatCustomers.length / customers.length) * 100)}% of total` : undefined} />
+          <StatCard label="New Today" value={newToday.length} color="#e8a33d" />
+        </div>
+
+        <div className="card" style={{ borderRadius: 18, overflow: "hidden" }}>
+          {sorted.length === 0 ? (
+            <div style={{ padding: 44, textAlign: "center", color: "var(--text-secondary, #6b6b7b)" }}>
+              <div style={{ fontSize: 38, marginBottom: 10 }}>👥</div>
+              <p style={{ margin: 0, fontSize: 14 }}>No customers tracked yet. Add a name or phone when generating a bill to start building your CRM.</p>
+            </div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead>
+                  <tr style={{ borderBottom: "1px solid var(--border, #e6e1d6)", textAlign: "left", background: "var(--surface-2, #f3efe6)" }}>
+                    <th style={{ padding: "10px 14px" }}>Name</th>
+                    <th style={{ padding: "10px 14px" }}>Phone</th>
+                    <th style={{ padding: "10px 14px" }}>Orders</th>
+                    <th style={{ padding: "10px 14px" }}>Total Spent</th>
+                    <th style={{ padding: "10px 14px" }}>Last Visit</th>
+                    <th style={{ padding: "10px 14px" }}>Type</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sorted.map((c) => (
+                    <tr key={c.id} style={{ borderBottom: "1px solid #f4f4f4" }}>
+                      <td style={{ padding: "10px 14px", fontWeight: 600 }}>{c.name || "—"}</td>
+                      <td style={{ padding: "10px 14px" }}>{c.phone || "—"}</td>
+                      <td style={{ padding: "10px 14px" }}>{c.orderCount || 0}</td>
+                      <td style={{ padding: "10px 14px", fontWeight: 700 }}>₹{(c.totalSpent || 0).toLocaleString()}</td>
+                      <td style={{ padding: "10px 14px", color: "#888" }}>{c.lastSeen ? new Date(c.lastSeen).toLocaleDateString() : "-"}</td>
+                      <td style={{ padding: "10px 14px" }}>
+                        {(c.orderCount || 0) > 1 ? <span className="badge" style={{ background: "#dcfce7", color: "#166534" }}>Repeat</span> : <span className="badge">New</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
 
   // === NEW: Waiter Calls panel (Dashboard) ===
   function renderWaiterCallsPanel() {
@@ -1951,14 +2277,14 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                 ))}
                 {orderFilter === "served" && currentData.map((o) => (
                   <OrderCard key={o.id} order={o}>
-                    <button className="btn btn-sm btn-primary" onClick={() => generateBill(o, false)} style={{ flex: 1 }}>Generate Bill</button>
-                    {billing.upiId && billing.upiSelfPayEnabled && <button className="btn btn-sm btn-ghost" onClick={() => generateBill(o, true)} style={{ flex: 1 }}>Bill + QR</button>}
+                    <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(o, false)} style={{ flex: 1 }}>Generate Bill</button>
+                    {billing.upiId && billing.upiSelfPayEnabled && <button className="btn btn-sm btn-ghost" onClick={() => openGenerateBill(o, true)} style={{ flex: 1 }}>Bill + QR</button>}
                   </OrderCard>
                 ))}
                 {orderFilter === "billRequested" && currentData.map((o) => (
                   <OrderCard key={o.id} order={o}>
-                    <button className="btn btn-sm btn-primary" onClick={() => generateBill(o, false)} style={{ flex: 1 }}>Generate Bill</button>
-                    {billing.upiId && billing.upiSelfPayEnabled && <button className="btn btn-sm btn-ghost" onClick={() => generateBill(o, true)} style={{ flex: 1 }}>Bill + QR</button>}
+                    <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(o, false)} style={{ flex: 1 }}>Generate Bill</button>
+                    {billing.upiId && billing.upiSelfPayEnabled && <button className="btn btn-sm btn-ghost" onClick={() => openGenerateBill(o, true)} style={{ flex: 1 }}>Bill + QR</button>}
                   </OrderCard>
                 ))}
                 {orderFilter === "billed" && currentData.map((o) => (
@@ -1967,6 +2293,12 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                       <span style={{ fontWeight: 700 }}>Table {billedTableLabels[o.id] || o.table}</span>
                       <span className="badge badge-billed">billed</span>
                     </div>
+                    {(o.customerName || o.customerPhone || o.paymentMethod) && (
+                      <div style={{ fontSize: 11.5, color: "#888", marginBottom: 8, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        {(o.customerName || o.customerPhone) && <span>👤 {o.customerName || ""} {o.customerPhone ? `· ${o.customerPhone}` : ""}</span>}
+                        {o.paymentMethod && <span style={{ textTransform: "capitalize" }}>💳 {o.paymentMethod}</span>}
+                      </div>
+                    )}
                     {o.items.map((it, i) => (
                       <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13.5, padding: "3px 0" }}>
                         <span>{it.name} ×{it.qty}</span><span>₹{it.price * it.qty}</span>
@@ -2006,7 +2338,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
                         <button className="btn btn-sm btn-ghost" onClick={() => printBill(o)} style={{ flex: 1 }}>Print</button>
                         {features.splitBill && <button className="btn btn-sm btn-ghost" onClick={() => openSplitBill(o)} style={{ flex: 1 }}>Split Bill</button>}
-                        <button className="btn btn-sm btn-success" onClick={() => markPaid(o.id)} style={{ flex: 1 }}>Mark Paid</button>
+                        <button className="btn btn-sm btn-success" onClick={() => openMarkPaid(o)} style={{ flex: 1 }}>Mark Paid</button>
                       </div>
                     )}
                   </div>
@@ -2046,8 +2378,9 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10, maxHeight: 440, overflowY: "auto" }}>
               {posItems.map((item) => (
                 <div key={item.id} className="card" style={{ padding: 10, borderRadius: 12, textAlign: "center", overflow: "hidden" }}>
-                  <div style={{ width: "100%", aspectRatio: "1 / 1", borderRadius: 10, overflow: "hidden", marginBottom: 8, background: "var(--surface-2, #f3efe6)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <div style={{ width: "100%", aspectRatio: "1 / 1", borderRadius: 10, overflow: "hidden", marginBottom: 8, background: "var(--surface-2, #f3efe6)", display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
                     {item.imageUrl ? <img src={item.imageUrl} alt={item.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 26 }}>🍽️</span>}
+                    {item.bogoEnabled && <span style={{ position: "absolute", top: 4, left: 4, background: "#16a34a", color: "#fff", fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 100 }}>🎁 BOGO</span>}
                   </div>
                   <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.name}</div>
                   <div style={{ fontSize: 12, color: "#e8a33d", fontWeight: 800, marginBottom: 8 }}>₹{item.price}</div>
@@ -2148,47 +2481,26 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
         <h2 style={{ fontSize: 24, fontWeight: 800, margin: 0, fontFamily: "'Fraunces', serif" }}>Menu</h2>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button className="btn btn-ghost" onClick={() => { setShowAddItem((s) => !s); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowAddBundleRule(false); setShowAddPromo(false); }}>{showAddItem ? "Close" : "+ Add Item"}</button>
-          {features.combos && <button className="btn btn-ghost" onClick={() => { setShowAddCombo((s) => !s); setShowAddItem(false); setShowAddCategory(false); setShowImportModal(false); setShowAddBundleRule(false); setShowAddPromo(false); }}>{showAddCombo ? "Close" : "+ Add Combo"}</button>}
-          <button className="btn btn-ghost" onClick={() => { setShowAddCategory((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowImportModal(false); setShowAddBundleRule(false); setShowAddPromo(false); }}>{showAddCategory ? "Close" : "+ Add Category"}</button>
-          {features.promoBanner && <button className="btn btn-ghost" onClick={() => { setShowAddPromo((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowAddBundleRule(false); }}>{showAddPromo ? "Close" : "+ Add Exclusive Deal"}</button>}
-          {features.smartSuggestions && <button className="btn btn-ghost" onClick={() => { setShowAddBundleRule((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowAddPromo(false); setShowManageOffers(false); }}>{showAddBundleRule ? "Close" : "+ Smart Deal"}</button>}
-          <button className="btn btn-ghost" onClick={() => { setShowManageOffers((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowAddBundleRule(false); setShowAddPromo(false); }}>{showManageOffers ? "Close" : "🎠 Offer Carousel"}</button>
-          <button className="btn btn-primary" onClick={() => { setShowImportModal(true); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowAddBundleRule(false); setShowAddPromo(false); setShowManageOffers(false); }}>↑ Import Menu</button>
+          <button className="btn btn-ghost" onClick={() => { setShowAddItem((s) => !s); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowAddBundleRule(false); }}>{showAddItem ? "Close" : "+ Add Item"}</button>
+          {features.combos && <button className="btn btn-ghost" onClick={() => { setShowAddCombo((s) => !s); setShowAddItem(false); setShowAddCategory(false); setShowImportModal(false); setShowAddBundleRule(false); }}>{showAddCombo ? "Close" : "+ Add Combo"}</button>}
+          <button className="btn btn-ghost" onClick={() => { setShowAddCategory((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowImportModal(false); setShowAddBundleRule(false); }}>{showAddCategory ? "Close" : "+ Add Category"}</button>
+          {features.smartSuggestions && <button className="btn btn-ghost" onClick={() => { setShowAddBundleRule((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowManageOffers(false); }}>{showAddBundleRule ? "Close" : "+ Smart Deal"}</button>}
+          <button className="btn btn-ghost" onClick={() => { setShowManageOffers((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowAddBundleRule(false); }}>{showManageOffers ? "Close" : "🎠 Exclusive Deals"}</button>
+          <button className="btn btn-primary" onClick={() => { setShowImportModal(true); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowAddBundleRule(false); setShowManageOffers(false); }}>↑ Import Menu</button>
         </div>
       </div>
 
-      {/* NEW: Exclusive Deal (promo banner), moved here from Settings */}
-      {showAddPromo && (
-        <div className="card" style={{ padding: 20, borderRadius: 16, marginBottom: 20, border: "2px dashed #e8a33d" }}>
-          <h3 style={{ fontSize: 14.5, fontWeight: 700, marginBottom: 6 }}>Exclusive Deal Banner</h3>
-          <p style={{ fontSize: 12.5, color: "var(--text-secondary, #6b6b7b)", marginBottom: 14 }}>Shown at the bottom of the customer menu. Optionally link it to an item/combo so tapping adds it to the cart.</p>
-          <label style={labelStyle}>Banner Title</label>
-          <input placeholder="e.g. 30% off combos this week" value={promoForm.title} onChange={(e) => setPromoForm((p) => ({ ...p, title: e.target.value }))} style={inputStyle} />
-          <label style={labelStyle}>Banner Image</label>
-          <input ref={promoFileInputRef} type="file" accept="image/*" onChange={(e) => handlePromoImageUpload(e.target.files[0])} style={{ display: "none" }} />
-          <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
-            <button onClick={() => promoFileInputRef.current?.click()} disabled={promoUploading} className="btn btn-ghost" style={{ border: "2px dashed var(--border, #e6e1d6)" }}>{promoUploading ? "Uploading..." : "Upload Photo"}</button>
-            {promoForm.imageUrl && !promoUploading && <img src={promoForm.imageUrl} alt="" style={{ width: 48, height: 48, borderRadius: 10, objectFit: "cover" }} />}
-          </div>
-          <label style={labelStyle}>Link to item/combo (optional)</label>
-          <select value={promoForm.linkedItemId} onChange={(e) => setPromoForm((p) => ({ ...p, linkedItemId: e.target.value }))} style={inputStyle}>
-            <option value="">No link — image only</option>
-            {menuItems.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
-          </select>
-          <button className="btn btn-primary" onClick={savePromoBanner}>{promoSaved ? "Saved ✓" : "Save Banner"}</button>
-        </div>
-      )}
-
       {/* NEW: Offer Carousel — reception-curated exclusive deal banners (up to 8),
-          shown as the top carousel on the customer menu. Each banner is an image
-          + title, linked to a menu item — tapping it in the customer app adds
-          that item straight to the cart. */}
+          shown as the top scrollable carousel on the customer menu. Each banner is
+          an image + title, optionally with a day-limited discount, linked to a menu
+          item — tapping it in the customer app adds that item (at the discounted
+          price, if today qualifies) straight to the cart. This is now the single
+          "exclusive deals" system — it replaces the old one-at-a-time promo banner. */}
       {showManageOffers && (
         <div className="card" style={{ padding: 20, borderRadius: 16, marginBottom: 20, border: "2px dashed #0369a1" }}>
-          <h3 style={{ fontSize: 14.5, fontWeight: 700, marginBottom: 6 }}>🎠 Offer Carousel</h3>
+          <h3 style={{ fontSize: 14.5, fontWeight: 700, marginBottom: 6 }}>🎠 Exclusive Deals</h3>
           <p style={{ fontSize: 12.5, color: "var(--text-secondary, #6b6b7b)", marginBottom: 14 }}>
-            Up to 8 exclusive-deal banners shown at the top of the customer menu. Title and price are overlaid on the photo — tapping a banner adds the linked item straight to the cart. If you add none, this section simply won't show.
+            Up to 8 deal banners shown in a scrollable carousel at the top of the customer menu. Title and price are overlaid on the photo — tapping a banner adds the linked item straight to the cart. Set a discount and pick which days it's active (leave days unpicked to apply every day). If you add none, this section simply won't show.
           </p>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 4, marginBottom: 4 }}>
@@ -2204,6 +2516,26 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
               </select>
             </div>
           </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 4, marginBottom: 4 }}>
+            <div>
+              <label style={labelStyle}>Discount (%, optional)</label>
+              <input placeholder="e.g. 20" type="number" min="0" max="100" value={newOfferBanner.discountPercent} onChange={(e) => setNewOfferBanner((p) => ({ ...p, discountPercent: e.target.value }))} style={inputStyle} />
+            </div>
+          </div>
+          <label style={labelStyle}>Active Days (none selected = every day)</label>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+            {DAY_OPTIONS.map((d) => {
+              const selected = (newOfferBanner.days || []).includes(d.key);
+              return (
+                <button key={d.key} type="button" onClick={() => setNewOfferBanner((p) => ({ ...p, days: selected ? p.days.filter((k) => k !== d.key) : [...(p.days || []), d.key] }))}
+                  style={{ padding: "7px 12px", borderRadius: 100, border: selected ? "2px solid #0369a1" : "1px solid #ddd", background: selected ? "#e0f2fe" : "#fff", color: selected ? "#0369a1" : "#666", cursor: "pointer", fontSize: 12.5, fontWeight: 700 }}>
+                  {d.label}
+                </button>
+              );
+            })}
+          </div>
+
           <label style={labelStyle}>Banner Image</label>
           <input ref={offerBannerFileInputRef} type="file" accept="image/*" onChange={(e) => handleOfferBannerImageUpload(e.target.files[0])} style={{ display: "none" }} />
           <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 14 }}>
@@ -2218,13 +2550,14 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {offerBanners.map((banner, i) => {
                   const linked = menuItems.find((m) => m.id === banner.linkedItemId);
+                  const daysLabel = !banner.days || banner.days.length === 0 ? "Every day" : banner.days.map((k) => DAY_OPTIONS.find((d) => d.key === k)?.label || k).join(", ");
                   return (
                     <div key={banner.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "var(--surface-2, #f3efe6)", borderRadius: 10 }}>
                       <span style={{ width: 22, height: 22, borderRadius: "50%", background: "#0369a1", color: "#fff", fontSize: 11.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{i + 1}</span>
                       {banner.imageUrl && <img src={banner.imageUrl} alt="" style={{ width: 34, height: 34, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />}
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontWeight: 700, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{banner.title}</div>
-                        <div style={{ fontSize: 11, color: "#888" }}>{linked ? `→ ${linked.name}` : "No linked item"}</div>
+                        <div style={{ fontSize: 11, color: "#888" }}>{linked ? `→ ${linked.name}` : "No linked item"}{banner.discountPercent > 0 ? ` · ${banner.discountPercent}% off` : ""} · {daysLabel}</div>
                       </div>
                       <button className="btn btn-sm btn-ghost" disabled={i === 0} onClick={() => moveOfferBanner(banner, "up")} style={{ padding: "4px 10px", opacity: i === 0 ? 0.4 : 1 }}>↑</button>
                       <button className="btn btn-sm btn-ghost" disabled={i === offerBanners.length - 1} onClick={() => moveOfferBanner(banner, "down")} style={{ padding: "4px 10px", opacity: i === offerBanners.length - 1 ? 0.4 : 1 }}>↓</button>
@@ -2242,7 +2575,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
       {showAddBundleRule && (
         <div className="card" style={{ padding: 20, borderRadius: 16, marginBottom: 20, border: "2px dashed #7c3aed" }}>
           <h3 style={{ fontSize: 14.5, fontWeight: 700, marginBottom: 6 }}>New Smart Deal</h3>
-          <p style={{ fontSize: 12.5, color: "var(--text-secondary, #6b6b7b)", marginBottom: 14 }}>You set the rule and the discount — billing applies it automatically, no manual math.</p>
+          <p style={{ fontSize: 12.5, color: "var(--text-secondary, #6b6b7b)", marginBottom: 14 }}>You set the rule and the discount — billing applies it automatically, no manual math. (Buy 1 Get 1 Free doesn't need a rule here — just flag the item as BOGO when adding/editing it.)</p>
           <label style={labelStyle}>Deal Name</label>
           <input placeholder="e.g. Weekend Feast" value={newBundleRule.name} onChange={(e) => setNewBundleRule((p) => ({ ...p, name: e.target.value }))} style={inputStyle} />
           <label style={labelStyle}>Deal Type</label>
@@ -2597,6 +2930,8 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
           <label style={labelStyle}>Food Type *</label>
           <FoodTypeToggle value={newItem.foodType} onChange={(v) => setNewItem((p) => ({ ...p, foodType: v }))} />
 
+          <VariationsAddonsEditor form={newItem} setForm={setNewItem} />
+
           <label style={labelStyle}>Food Photo</label>
           <input ref={fileInputRef} type="file" accept="image/*" onChange={(e) => handleImageUpload(e.target.files[0], false)} style={{ display: "none" }} />
           <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
@@ -2609,6 +2944,10 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
 
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, fontWeight: 600, cursor: "pointer", marginBottom: 14 }}>
             <input type="checkbox" checked={!!newItem.chefSpecial} onChange={(e) => setNewItem((p) => ({ ...p, chefSpecial: e.target.checked }))} /> Mark as Chef's Special
+          </label>
+
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, fontWeight: 600, cursor: "pointer", marginBottom: 14 }}>
+            <input type="checkbox" checked={!!newItem.bogoEnabled} onChange={(e) => setNewItem((p) => ({ ...p, bogoEnabled: e.target.checked }))} /> 🎁 Buy 1 Get 1 Free (highest-priced unit in each pair is charged, other is free)
           </label>
 
           <button className="btn btn-primary" onClick={addMenuItem}>+ Add Item to Menu</button>
@@ -3067,6 +3406,39 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     </div>
   );
 
+  // === NEW: optional customer-details modal shown before generating a bill ===
+  const billCustomerModal = billCustomerOrder && (
+    <div style={modalOverlayStyle} onClick={() => setBillCustomerOrder(null)}>
+      <div style={modalBoxStyle} onClick={(e) => e.stopPropagation()}>
+        <h3 style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>Customer Details</h3>
+        <p style={{ fontSize: 12.5, color: "#888", marginBottom: 16 }}>Optional — add a name/phone to track repeat visits in the CRM tab.</p>
+        <label style={labelStyle}>Name</label>
+        <input placeholder="e.g. Rahul Sharma" value={billCustomerForm.name} onChange={(e) => setBillCustomerForm((p) => ({ ...p, name: e.target.value }))} style={inputStyle} />
+        <label style={labelStyle}>Phone</label>
+        <input placeholder="e.g. 98765 43210" value={billCustomerForm.phone} onChange={(e) => setBillCustomerForm((p) => ({ ...p, phone: e.target.value }))} style={inputStyle} />
+        <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+          <button className="btn btn-ghost" onClick={() => { generateBill(billCustomerOrder.order, billCustomerOrder.withQr, null); setBillCustomerOrder(null); }} style={{ flex: 1 }}>Skip & Generate</button>
+          <button className="btn btn-primary" onClick={() => { generateBill(billCustomerOrder.order, billCustomerOrder.withQr, billCustomerForm); setBillCustomerOrder(null); }} style={{ flex: 1 }}>Save & Generate</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // === NEW: payment-method picker shown before finalizing Mark Paid ===
+  const paymentMethodModal = paymentMethodOrder && (
+    <div style={modalOverlayStyle} onClick={() => setPaymentMethodOrder(null)}>
+      <div style={modalBoxStyle} onClick={(e) => e.stopPropagation()}>
+        <h3 style={{ fontSize: 18, fontWeight: 800, marginBottom: 14 }}>How did the customer pay?</h3>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
+          {PAYMENT_METHODS.map((m) => (
+            <button key={m.key} className="btn btn-ghost" onClick={() => confirmMarkPaid(m.key)} style={{ justifyContent: "flex-start" }}>{m.icon} {m.label}</button>
+          ))}
+        </div>
+        <button onClick={() => setPaymentMethodOrder(null)} style={{ width: "100%", background: "none", border: "none", color: "#888", cursor: "pointer", padding: 8, fontSize: 13 }}>Cancel</button>
+      </div>
+    </div>
+  );
+
   // === RETURN ===
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: "'Inter', sans-serif" }}>
@@ -3099,6 +3471,8 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
       {splitBillModal}
       {qrModal}
       {moveOrderModal}
+      {billCustomerModal}
+      {paymentMethodModal}
 
       {isMobile && sidebarOpen && <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 99 }} onClick={() => setSidebarOpen(false)} />}
 
@@ -3154,6 +3528,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
           {activeTab === "pos" && renderPOS()}
           {activeTab === "menu" && renderMenu()}
           {activeTab === "tables" && renderTables()}
+          {activeTab === "crm" && renderCRM()}
           {activeTab === "settings" && renderSettings()}
         </div>
       </main>

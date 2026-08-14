@@ -1,25 +1,5 @@
 "use client";
-// FINAL REDESIGN — table-side customer menu, matching the Oak Restro reference layout.
-//
-// UPDATE (this pass):
-// 1. "Customise this item" is now a clearly-visible pill button (was a faint
-//    underlined link tucked right under the description).
-// 2. NEW: every cart line now has its own "Customise this item" link. Tapping
-//    it reopens the item modal pre-filled with that line's current spice
-//    level / notes and SAVES BACK onto that same line (no duplicate line).
-// 3. "People also ordered" rebuilt as two full image cards (max 2 items).
-// 4. "Complete your meal" rebuilt as one attractive image card instead of a
-//    thin text row.
-// 5. Call Waiter button now has a tiny "Call Staff" caption under it.
-//
-// Everything else (hero carousel, spotlight card, category pills, promo
-// banner, Google-review flow, dine-in/takeaway, bill flow) is UNCHANGED.
-//
-// Firestore fields this page expects to exist (maintained elsewhere — reception
-// dashboard / a future aggregation job, not by this file):
-//   menuItems/{id}: averageRating, reviewCount, mostLoved, mostOrdered, mostRated
-//   info/settings: googleReviewLink
-// This file reads them defensively — everything degrades gracefully if absent.
+
 
 import { Suspense, useEffect, useState, useRef, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
@@ -44,6 +24,41 @@ const CATEGORY_ICONS = {
 
 // NEW: catchy background palette for the "Loved by Everyone" spotlight carousel.
 const SPOTLIGHT_COLORS = ["#FFF4E0", "#E7F8EF", "#EAF1FF", "#FDEAF0", "#F3ECFF"];
+
+// NEW: offer-banner day-of-week + discount helpers.
+const DAY_KEYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+function isOfferActiveToday(banner) {
+  if (!banner.days || banner.days.length === 0) return true; // no days picked = every day
+  return banner.days.includes(DAY_KEYS[new Date().getDay()]);
+}
+// Returns the discounted unit price for the banner's linked item today, or
+// null if there's no discount configured or today isn't one of the chosen days.
+function computeOfferPrice(banner, item) {
+  if (!item || !banner.discountPercent || banner.discountPercent <= 0) return null;
+  if (!isOfferActiveToday(banner)) return null;
+  return Math.max(0, Math.round(item.price * (1 - banner.discountPercent / 100)));
+}
+
+// NEW: Buy 1 Get 1 Free preview — mirrors the reception-side computeBogoDiscount
+// logic exactly (pairs every unit of bogoEnabled items high→low, frees the
+// cheaper of each pair; the pricier item in a pair is always what's charged).
+// This is only a live preview for the diner — the real deduction is computed
+// and applied at billing time on the reception side, from the same items.
+function computeBogoPreview(cart, menuItems) {
+  const units = [];
+  Object.values(cart).forEach((line) => {
+    const mi = menuItems.find((m) => m.id === line.itemId);
+    if (mi?.bogoEnabled) {
+      const unitPrice = line.priceOverride != null ? line.priceOverride : mi.price;
+      for (let i = 0; i < line.qty; i++) units.push(unitPrice);
+    }
+  });
+  if (units.length < 2) return 0;
+  units.sort((a, b) => b - a);
+  let amount = 0;
+  for (let i = 1; i < units.length; i += 2) amount += units[i];
+  return Math.round(amount);
+}
 
 const MEAL_COMPLETION_RULES = {
   "Mains": { needs: ["Breads & Rice", "Bread", "Rice", "Breads"], suggestCategory: "Breads & Rice" },
@@ -158,8 +173,10 @@ function RatingBadge({ rating, count, size = "sm" }) {
 
 function MenuCard({ item, qty, onAdd, onOpenDetail, width }) {
   const [pulses, setPulses] = useState([]);
+  const hasVariations = item.variations?.length > 0;
   function handleAdd(e) {
     e.stopPropagation();
+    if (hasVariations) { onOpenDetail(item); return; }
     const id = `${Date.now()}-${Math.random()}`;
     setPulses((p) => [...p, id]);
     setTimeout(() => setPulses((p) => p.filter((x) => x !== id)), 700);
@@ -174,8 +191,15 @@ function MenuCard({ item, qty, onAdd, onOpenDetail, width }) {
         ) : (
           <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 40 }}>🍽️</div>
         )}
-        {item.isCombo && (
-          <span style={{ position: "absolute", top: 8, left: 8, background: "#1a1a2e", color: "#fff", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 100 }}>COMBO</span>
+        {(item.isCombo || item.bogoEnabled) && (
+          <div style={{ position: "absolute", top: 8, left: 8, display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start", zIndex: 2 }}>
+            {item.isCombo && (
+              <span style={{ background: "#1a1a2e", color: "#fff", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 100 }}>COMBO</span>
+            )}
+            {item.bogoEnabled && (
+              <span style={{ background: "#16a34a", color: "#fff", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 100 }}>🎁 Buy 1 Get 1 Free</span>
+            )}
+          </div>
         )}
         {item.mostLoved && (
           <span style={{ position: "absolute", top: 8, right: 8, background: "#dc2626", color: "#fff", fontSize: 9, fontWeight: 800, padding: "2px 7px", borderRadius: 100 }}>🔥 Most Loved</span>
@@ -199,7 +223,7 @@ function MenuCard({ item, qty, onAdd, onOpenDetail, width }) {
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ fontWeight: 800, fontSize: 16, color: "#e8a33d" }}>₹{item.price}</span>
+            <span style={{ fontWeight: 800, fontSize: 16, color: "#e8a33d" }}>{hasVariations ? `From ₹${Math.min(...item.variations.map((v) => v.price))}` : `₹${item.price}`}</span>
             {(item.averageRating || item.reviewCount) && (
               <RatingBadge rating={item.averageRating} count={item.reviewCount} />
             )}
@@ -215,10 +239,77 @@ function MenuCard({ item, qty, onAdd, onOpenDetail, width }) {
 // NEW: startMode / initialNotes / initialSpiceLevel let this modal be reopened
 // from a CART LINE for editing — the parent decides (via `onAdd`) whether this
 // call means "add a new line" or "update the line I was already editing".
-function ItemDetailModal({ item, onClose, onAdd, startMode = "view", initialNotes = "", initialSpiceLevel = null }) {
+function ItemDetailModal({ item, onClose, onAdd, startMode = "view", initialNotes = "", initialSpiceLevel = null, initialVariationId = null, initialAddonIds = [] }) {
   const [mode, setMode] = useState(startMode);
   const [notes, setNotes] = useState(initialNotes);
   const [spiceLevel, setSpiceLevel] = useState(initialSpiceLevel);
+  const hasVariations = Array.isArray(item.variations) && item.variations.length > 0;
+  const hasAddons = Array.isArray(item.addons) && item.addons.length > 0;
+  const [variationId, setVariationId] = useState(initialVariationId || (hasVariations ? item.variations[0].id : null));
+  const [addonIds, setAddonIds] = useState(initialAddonIds || []);
+
+  const selectedVariation = hasVariations ? item.variations.find((v) => v.id === variationId) : null;
+  const basePrice = selectedVariation ? selectedVariation.price : item.price;
+  const addonsTotal = (item.addons || []).filter((a) => addonIds.includes(a.id)).reduce((s, a) => s + a.price, 0);
+  const unitPrice = basePrice + addonsTotal;
+
+  function toggleAddon(id) {
+    setAddonIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+  // Only builds a "customized" line (spice/notes/size/add-ons) when something
+  // actually differs from the plain item — otherwise repeated taps on a plain
+  // item wouldn't merge into a single cart line the way they used to.
+  function buildCustomization(extra) {
+    const addonNames = (item.addons || []).filter((a) => addonIds.includes(a.id)).map((a) => a.name);
+    return {
+      notes: extra?.notes || "",
+      spiceLevel: extra?.spiceLevel || null,
+      variationId: variationId || null,
+      variationName: selectedVariation?.name || null,
+      addonIds,
+      addonNames,
+      unitPrice,
+    };
+  }
+  function isCustomized(extra) {
+    return hasVariations || hasAddons || !!extra?.notes || !!extra?.spiceLevel;
+  }
+
+  const sizeAddonBlock = (
+    <>
+      {hasVariations && (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#6b6b7b", textTransform: "uppercase", marginBottom: 8 }}>Choose Size</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {item.variations.map((v) => (
+              <button key={v.id} onClick={() => setVariationId(v.id)} style={{ padding: "8px 14px", borderRadius: 100, fontSize: 13, fontWeight: 700, cursor: "pointer", border: variationId === v.id ? "2px solid #e8a33d" : "1px solid #ddd", background: variationId === v.id ? "#fff5e0" : "#fff" }}>
+                {v.name} · ₹{v.price}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {hasAddons && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#6b6b7b", textTransform: "uppercase", marginBottom: 8 }}>Add Extras</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {item.addons.map((a) => (
+              <label key={a.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 12px", borderRadius: 10, border: addonIds.includes(a.id) ? "2px solid #e8a33d" : "1px solid #eee", background: addonIds.includes(a.id) ? "#fff5e0" : "#fff", cursor: "pointer" }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, fontWeight: 600 }}>
+                  <input type="checkbox" checked={addonIds.includes(a.id)} onChange={() => toggleAddon(a.id)} />
+                  {a.name}
+                </span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "#e8a33d" }}>+₹{a.price}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+      {(hasVariations || hasAddons) && (
+        <div style={{ marginTop: 14, fontSize: 15, fontWeight: 800, color: "#1a1a2e" }}>Total: ₹{unitPrice}</div>
+      )}
+    </>
+  );
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 250, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
@@ -231,7 +322,7 @@ function ItemDetailModal({ item, onClose, onAdd, startMode = "view", initialNote
               <div style={{ fontSize: 20, fontWeight: 800 }}>{item.name}</div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
-              <div style={{ fontSize: 18, fontWeight: 700, color: "#e8a33d" }}>₹{item.price}</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: "#e8a33d" }}>{hasVariations ? `From ₹${Math.min(...item.variations.map((v) => v.price))}` : `₹${item.price}`}</div>
               {(item.averageRating || item.reviewCount) && (
                 <RatingBadge rating={item.averageRating} count={item.reviewCount} size="md" />
               )}
@@ -242,19 +333,26 @@ function ItemDetailModal({ item, onClose, onAdd, startMode = "view", initialNote
 
         {mode === "view" && (
           <>
-            <p style={{ fontSize: 14, color: "#555", lineHeight: 1.5, marginTop: 12, marginBottom: 14 }}>{item.description || "No description available."}</p>
-            <button onClick={() => setMode("customize")} className="tap-btn" style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#fff5e0", border: "1px solid #fde68a", color: "#92400e", fontSize: 12.5, fontWeight: 700, padding: "8px 14px", borderRadius: 100, cursor: "pointer", marginBottom: 20 }}>
-              ✎ Customise this item
+            <p style={{ fontSize: 14, color: "#555", lineHeight: 1.5, marginTop: 12, marginBottom: 6 }}>{item.description || "No description available."}</p>
+            {item.bogoEnabled && (
+              <div style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#dcfce7", color: "#166534", fontSize: 12, fontWeight: 800, padding: "6px 12px", borderRadius: 100, marginTop: 4 }}>
+                🎁 Buy 1 Get 1 Free
+              </div>
+            )}
+            {sizeAddonBlock}
+            <button onClick={() => setMode("customize")} className="tap-btn" style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#fff5e0", border: "1px solid #fde68a", color: "#92400e", fontSize: 12.5, fontWeight: 700, padding: "8px 14px", borderRadius: 100, cursor: "pointer", margin: "16px 0 20px" }}>
+              🌶 Spice level / special request
             </button>
-            <button onClick={() => { onAdd(item.id, 1, null); onClose(); }} style={{ width: "100%", padding: 14, borderRadius: 14, border: "none", background: "#1a1a2e", color: "#fff", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
-              + Add to Cart
+            <button onClick={() => { const custom = isCustomized() ? buildCustomization() : null; onAdd(item.id, 1, custom); onClose(); }} style={{ width: "100%", padding: 14, borderRadius: 14, border: "none", background: "#1a1a2e", color: "#fff", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
+              + Add to Cart · ₹{unitPrice}
             </button>
           </>
         )}
 
         {mode === "customize" && (
           <div style={{ marginTop: 16, animation: "fadeIn 0.25s ease" }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "#6b6b7b", textTransform: "uppercase", marginBottom: 8 }}>Spice Level</div>
+            {sizeAddonBlock}
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#6b6b7b", textTransform: "uppercase", marginBottom: 8, marginTop: (hasVariations || hasAddons) ? 20 : 0 }}>Spice Level</div>
             <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
               {SPICE_LEVELS.map((lvl) => (
                 <button key={lvl} onClick={() => setSpiceLevel(lvl === spiceLevel ? null : lvl)} style={{ padding: "8px 14px", borderRadius: 100, fontSize: 13, fontWeight: 600, cursor: "pointer", border: spiceLevel === lvl ? "2px solid #e8a33d" : "1px solid #ddd", background: spiceLevel === lvl ? "#fff5e0" : "#fff" }}>
@@ -267,8 +365,8 @@ function ItemDetailModal({ item, onClose, onAdd, startMode = "view", initialNote
               style={{ width: "100%", padding: 12, borderRadius: 12, border: "1px solid #ddd", fontSize: 14, fontFamily: "inherit", marginBottom: 20, boxSizing: "border-box", resize: "none" }} />
             <div style={{ display: "flex", gap: 10 }}>
               <button onClick={() => setMode("view")} style={{ flex: 1, padding: 14, borderRadius: 14, border: "1px solid #ddd", background: "#fff", fontWeight: 600, cursor: "pointer" }}>Back</button>
-              <button onClick={() => { onAdd(item.id, 1, { notes, spiceLevel }); onClose(); }} style={{ flex: 2, padding: 14, borderRadius: 14, border: "none", background: "#e8a33d", color: "#1a1a2e", fontWeight: 700, cursor: "pointer" }}>
-                {startMode === "customize" ? "Save Changes" : "Add Customised Item"}
+              <button onClick={() => { onAdd(item.id, 1, buildCustomization({ notes, spiceLevel })); onClose(); }} style={{ flex: 2, padding: 14, borderRadius: 14, border: "none", background: "#e8a33d", color: "#1a1a2e", fontWeight: 700, cursor: "pointer" }}>
+                {startMode === "customize" ? "Save Changes" : `Add to Cart · ₹${unitPrice}`}
               </button>
             </div>
           </div>
@@ -620,7 +718,6 @@ function TableContent() {
   const [editingLineId, setEditingLineId] = useState(null);
   const [ratingOrder, setRatingOrder] = useState(null);
   const [vegOnly, setVegOnly] = useState(false);
-  const [promoBanner, setPromoBanner] = useState(null);
   const [googleReviewLink, setGoogleReviewLink] = useState("");
   const [bundleRules, setBundleRules] = useState([]); // Smart Deals — same collection reception manages
   const [exploreFilter, setExploreFilter] = useState("all");
@@ -642,14 +739,6 @@ function TableContent() {
     if (!restaurantId) return;
     const unsub = onSnapshot(doc(db, "restaurants", restaurantId, "info", "profile"), (snap) => {
       if (snap.exists()) setProfile(snap.data());
-    });
-    return () => unsub();
-  }, [restaurantId]);
-
-  useEffect(() => {
-    if (!restaurantId) return;
-    const unsub = onSnapshot(doc(db, "restaurants", restaurantId, "info", "promoBanner"), (snap) => {
-      if (snap.exists()) setPromoBanner(snap.data());
     });
     return () => unsub();
   }, [restaurantId]);
@@ -815,8 +904,13 @@ function TableContent() {
   function handleOfferBannerClick(banner) {
     if (!banner.linkedItemId) return;
     playTone(680, 90, "triangle");
-    addToCart(banner.linkedItemId, 1);
     const item = findItem(banner.linkedItemId);
+    const discountedPrice = computeOfferPrice(banner, item);
+    if (discountedPrice != null) {
+      addToCart(banner.linkedItemId, 1, null, discountedPrice, { id: banner.id, label: `${banner.discountPercent}% off — ${banner.title}` });
+    } else {
+      addToCart(banner.linkedItemId, 1);
+    }
     triggerSuccessOverlay(item ? `${item.name} added!` : "Added to cart!");
   }
 
@@ -860,8 +954,8 @@ function TableContent() {
   }
 
   // NEW: opens the same modal, but pre-loaded with a specific cart line's
-  // current customization, and flagged so the Save button updates that line
-  // instead of adding a duplicate.
+  // current customization (spice/notes AND size/add-ons), and flagged so the
+  // Save button updates that line instead of adding a duplicate.
   function openLineCustomize(lineId) {
     const line = cart[lineId];
     if (!line) return;
@@ -877,15 +971,27 @@ function TableContent() {
   }
 
   // Routes the modal's "Add" action: if we opened it to edit an existing cart
-  // line, update that line in place; otherwise fall through to the normal
-  // add-to-cart behaviour.
+  // line, update that line (including any size/add-on change) in place;
+  // otherwise fall through to the normal add-to-cart behaviour.
   function handleDetailAdd(itemId, qty, customization) {
     if (editingLineId) {
       const lineId = editingLineId;
       setCart((prev) => {
         const line = prev[lineId];
         if (!line) return prev;
-        return { ...prev, [lineId]: { ...line, notes: customization?.notes || "", spiceLevel: customization?.spiceLevel || null } };
+        return {
+          ...prev,
+          [lineId]: {
+            ...line,
+            notes: customization?.notes || "",
+            spiceLevel: customization?.spiceLevel || null,
+            variationId: customization?.variationId ?? line.variationId ?? null,
+            variationName: customization?.variationName ?? line.variationName ?? null,
+            addonIds: customization?.addonIds ?? line.addonIds ?? [],
+            addonNames: customization?.addonNames ?? line.addonNames ?? [],
+            priceOverride: customization?.unitPrice != null ? customization.unitPrice : line.priceOverride,
+          },
+        };
       });
       setEditingLineId(null);
     } else {
@@ -893,15 +999,40 @@ function TableContent() {
     }
   }
 
-  function addToCart(itemId, qty, customization = null) {
+  // NEW: cart lines now carry an optional priceOverride (offer discounts, or
+  // variation + add-on pricing computed in the item modal) plus variation/
+  // add-on descriptors for display. `customization` (from the item modal) and
+  // `priceOverride`+`offerInfo` (from an offer-banner tap) are separate entry
+  // points so simple repeat taps on a plain item still merge into one line.
+  function addToCart(itemId, qty, customization = null, priceOverride = null, offerInfo = null) {
     setCart((prev) => {
-      if (!customization) {
+      if (!customization && priceOverride == null) {
         const plainId = `${itemId}-plain`;
         const existing = prev[plainId];
-        return { ...prev, [plainId]: { itemId, qty: (existing?.qty || 0) + qty, notes: "", spiceLevel: null } };
+        return { ...prev, [plainId]: { itemId, qty: (existing?.qty || 0) + qty, notes: "", spiceLevel: null, variationId: null, variationName: null, addonIds: [], addonNames: [], priceOverride: null, offerLabel: null } };
+      }
+      if (priceOverride != null && !customization) {
+        // Offer-triggered add — its own line per offer so it never merges
+        // with (and silently overwrites the price of) a regular-price line.
+        const lineId = `${itemId}-offer-${offerInfo?.id || "x"}`;
+        const existing = prev[lineId];
+        return { ...prev, [lineId]: { itemId, qty: (existing?.qty || 0) + qty, notes: "", spiceLevel: null, variationId: null, variationName: null, addonIds: [], addonNames: [], priceOverride, offerLabel: offerInfo?.label || null } };
       }
       const lineId = `${itemId}-${Date.now()}`;
-      return { ...prev, [lineId]: { itemId, qty, notes: customization.notes || "", spiceLevel: customization.spiceLevel || null } };
+      return {
+        ...prev,
+        [lineId]: {
+          itemId, qty,
+          notes: customization.notes || "",
+          spiceLevel: customization.spiceLevel || null,
+          variationId: customization.variationId || null,
+          variationName: customization.variationName || null,
+          addonIds: customization.addonIds || [],
+          addonNames: customization.addonNames || [],
+          priceOverride: customization.unitPrice != null ? customization.unitPrice : null,
+          offerLabel: null,
+        },
+      };
     });
   }
 
@@ -940,14 +1071,19 @@ function TableContent() {
   async function submitCart() {
     const items = Object.values(cart).map((line) => {
       const item = findItem(line.itemId);
-      return { name: item.name, qty: line.qty, price: item.price, notes: line.notes || "", spiceLevel: line.spiceLevel || null };
+      const composedName = item.name + (line.variationName ? ` — ${line.variationName}` : "");
+      const addonsNote = line.addonNames?.length ? `Add-ons: ${line.addonNames.join(", ")}` : "";
+      const composedNotes = [addonsNote, line.notes].filter(Boolean).join(" · ");
+      const unitPrice = line.priceOverride != null ? line.priceOverride : item.price;
+      return { name: composedName, qty: line.qty, price: unitPrice, notes: composedNotes || "", spiceLevel: line.spiceLevel || null };
     });
     if (items.length === 0) return;
 
-    // Note: no free-item injection here. Threshold/bundle deals are computed
-    // once, at bill time, by reception's Smart Deals engine (bundleRules) —
-    // that's the single source of truth. The ThresholdBanner below is just an
-    // accurate preview of what the diner will see deducted from the bill.
+    // Note: no free-item injection here. Threshold/bundle deals — including
+    // Buy 1 Get 1 Free — are computed once, at bill time, by reception's Smart
+    // Deals engine (bundleRules + item.bogoEnabled). That's the single source
+    // of truth. The banners below are just an accurate preview of what the
+    // diner will see deducted from the bill.
     await addDoc(collection(db, "restaurants", restaurantId, "orders"), {
       table: tableNo,
       items,
@@ -1007,8 +1143,17 @@ function TableContent() {
   const count = Object.values(cart).reduce((a, l) => a + l.qty, 0);
   const total = Object.values(cart).reduce((sum, l) => {
     const item = findItem(l.itemId);
-    return sum + (item ? item.price * l.qty : 0);
+    if (!item) return sum;
+    const unitPrice = l.priceOverride != null ? l.priceOverride : item.price;
+    return sum + unitPrice * l.qty;
   }, 0);
+  // NEW: Buy 1 Get 1 Free — pairs every unit of bogoEnabled items high→low and
+  // frees the cheaper of each pair (mirrors reception's computeBogoDiscount
+  // exactly, so this preview always matches what lands on the final bill).
+  // `total` above is the face-value sum of every line; `displayTotal` is what
+  // the diner will actually pay once that pairing is applied.
+  const bogoSavings = computeBogoPreview(cart, menuItems);
+  const displayTotal = Math.max(0, total - bogoSavings);
 
   // Which Smart Deal (if any) to surface in the ThresholdBanner — the next
   // active thresholdFreeItem rule the diner hasn't unlocked yet, or if every
@@ -1058,7 +1203,7 @@ function TableContent() {
           🛒
           {count > 0 && <span style={{ position: "absolute", top: -8, right: -8, background: "#e8a33d", color: "#1a1a2e", fontSize: 11, fontWeight: 800, padding: "1px 6px", borderRadius: 100 }}>{count}</span>}
         </span>
-        {count > 0 ? `View Cart · ₹${total}` : "Back to Order Status"}
+        {count > 0 ? `View Cart · ₹${displayTotal}` : "Back to Order Status"}
       </button>
     </div>
   ) : null;
@@ -1084,22 +1229,39 @@ function TableContent() {
         {Object.entries(cart).map(([lineId, line]) => {
           const item = findItem(line.itemId);
           if (!item) return null;
+          const unitPrice = line.priceOverride != null ? line.priceOverride : item.price;
+          const hasUnpickedAddons = item.addons?.length > 0 && (!line.addonNames || line.addonNames.length === 0);
           return (
             <div key={lineId} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 0", borderBottom: "1px solid #f0f0f0" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 {item.imageUrl && (<img src={item.imageUrl} alt="" style={{ width: 48, height: 48, borderRadius: 10, objectFit: "cover" }} />)}
                 <div>
-                  <div style={{ fontWeight: 600 }}>{item.name}</div>
-                  <div style={{ fontSize: 13, color: "#888" }}>₹{item.price} × {line.qty}</div>
+                  <div style={{ fontWeight: 600 }}>{item.name}{line.variationName ? ` — ${line.variationName}` : ""}{item.bogoEnabled ? " 🎁" : ""}</div>
+                  <div style={{ fontSize: 13, color: "#888" }}>
+                    ₹{unitPrice} × {line.qty}
+                    {line.priceOverride != null && line.priceOverride < item.price && <span style={{ color: "#aaa", textDecoration: "line-through", marginLeft: 6 }}>₹{item.price}</span>}
+                  </div>
+                  {line.offerLabel && <div style={{ fontSize: 11, color: "#16a34a", fontWeight: 700, marginTop: 2 }}>🎉 {line.offerLabel}</div>}
                   {line.spiceLevel && <div style={{ fontSize: 11, color: "#e8a33d", marginTop: 2 }}>🌶 {line.spiceLevel}</div>}
+                  {line.addonNames?.length > 0 && <div style={{ fontSize: 11, color: "#166534", marginTop: 2 }}>+ {line.addonNames.join(", ")}</div>}
                   {line.notes && <div style={{ fontSize: 11, color: "#888", fontStyle: "italic", marginTop: 2 }}>"{line.notes}"</div>}
-                  <button
-                    onClick={() => openLineCustomize(lineId)}
-                    className="tap-btn"
-                    style={{ background: "none", border: "none", color: "#e8a33d", fontSize: 11, fontWeight: 700, textDecoration: "underline", cursor: "pointer", padding: 0, marginTop: 4, display: "block" }}
-                  >
-                    ✎ Customise this item
-                  </button>
+                  {hasUnpickedAddons ? (
+                    <button
+                      onClick={() => openLineCustomize(lineId)}
+                      className="tap-btn"
+                      style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "#fff5e0", border: "1px solid #fde68a", color: "#92400e", fontSize: 10.5, fontWeight: 800, padding: "5px 10px", borderRadius: 100, cursor: "pointer", marginTop: 6 }}
+                    >
+                      🧀 Add extra toppings +
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => openLineCustomize(lineId)}
+                      className="tap-btn"
+                      style={{ background: "none", border: "none", color: "#e8a33d", fontSize: 11, fontWeight: 700, textDecoration: "underline", cursor: "pointer", padding: 0, marginTop: 4, display: "block" }}
+                    >
+                      ✎ Customise this item
+                    </button>
+                  )}
                 </div>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -1113,14 +1275,24 @@ function TableContent() {
 
         {count > 0 && (
           <div style={{ marginTop: 18 }}>
-            <ThresholdBanner cartTotal={total} activeOffer={thresholdBannerOffer} compact />
+            <ThresholdBanner cartTotal={displayTotal} activeOffer={thresholdBannerOffer} compact />
             <CompleteMealBanner cart={cart} menuItems={menuItems} onAdd={addToCart} compact />
             <PeopleAlsoOrderedBanner cart={cart} menuItems={menuItems} onAdd={addToCart} compact />
           </div>
         )}
 
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 20, paddingTop: 16, borderTop: "2px solid #1a1a2e", fontSize: 18, fontWeight: 800 }}>
-          <span>Total</span><span>₹{total}</span>
+        {bogoSavings > 0 && (
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 18, fontSize: 14, color: "#888" }}>
+              <span>Subtotal</span><span>₹{total}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 13.5, fontWeight: 700, color: "#16a34a" }}>
+              <span>🎁 Buy 1 Get 1 Free</span><span>-₹{bogoSavings}</span>
+            </div>
+          </>
+        )}
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: bogoSavings > 0 ? 10 : 20, paddingTop: 16, borderTop: "2px solid #1a1a2e", fontSize: 18, fontWeight: 800 }}>
+          <span>Total</span><span>₹{displayTotal}</span>
         </div>
         <button onClick={submitCart} className="tap-btn" style={{ width: "100%", marginTop: 20, padding: 16, borderRadius: 14, border: "none", background: "#e8a33d", color: "#1a1a2e", fontSize: 16, fontWeight: 700, cursor: "pointer" }}>
           {activeOrders.length > 0 ? "Add to Order" : (orderType === "takeaway" ? "Place Takeaway Order" : "Place Order")}
@@ -1331,7 +1503,7 @@ function TableContent() {
 
         <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "#fff", borderTop: "1px solid #eee", padding: "12px 20px", zIndex: 50 }}>
           <button onClick={() => { playTone(560, 70); setAddingMore(true); }} className="tap-btn" style={{ width: "100%", maxWidth: 480, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: 14, borderRadius: 50, border: "none", background: "#1a1a2e", color: "#fff", fontSize: 15, fontWeight: 600, cursor: "pointer", boxShadow: "0 4px 16px rgba(0,0,0,0.15)" }}>
-            <span>🛒</span>{count > 0 ? `${count} items · ₹${total}` : "Browse Menu"}
+            <span>🛒</span>{count > 0 ? `${count} items · ₹${displayTotal}` : "Browse Menu"}
           </button>
         </div>
       </div>
@@ -1351,6 +1523,8 @@ function TableContent() {
             startMode={editingLineId ? "customize" : "view"}
             initialNotes={editingLineId ? (cart[editingLineId]?.notes || "") : ""}
             initialSpiceLevel={editingLineId ? (cart[editingLineId]?.spiceLevel || null) : null}
+            initialVariationId={editingLineId ? (cart[editingLineId]?.variationId || null) : null}
+            initialAddonIds={editingLineId ? (cart[editingLineId]?.addonIds || []) : []}
           />
         )}
         <div style={{ position: "sticky", top: 0, zIndex: 10, background: "#fff", borderBottom: "1px solid #f0f0f0" }}>
@@ -1387,6 +1561,8 @@ function TableContent() {
           startMode={editingLineId ? "customize" : "view"}
           initialNotes={editingLineId ? (cart[editingLineId]?.notes || "") : ""}
           initialSpiceLevel={editingLineId ? (cart[editingLineId]?.spiceLevel || null) : null}
+          initialVariationId={editingLineId ? (cart[editingLineId]?.variationId || null) : null}
+          initialAddonIds={editingLineId ? (cart[editingLineId]?.addonIds || []) : []}
         />
       )}
       {ratingOrder && <RatingPopup order={ratingOrder} restaurantId={restaurantId} onDone={() => setRatingOrder(null)} googleReviewLink={googleReviewLink} />}
@@ -1478,12 +1654,21 @@ function TableContent() {
                         <div style={{ position: "absolute", left: 18, right: 18, bottom: 16 }}>
                           <div style={{ fontSize: 10.5, fontWeight: 800, color: "#e8a33d", textTransform: "uppercase", letterSpacing: 0.7, marginBottom: 5 }}>🎉 Exclusive Deal</div>
                           <div style={{ fontSize: 19, fontWeight: 800, color: "#fff", lineHeight: 1.25 }}>{banner.title}</div>
-                          {linkedItem && (
-                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-                              <span style={{ fontSize: 12.5, color: "rgba(255,255,255,0.9)", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 160 }}>{linkedItem.name}</span>
-                              <span style={{ fontSize: 12.5, fontWeight: 800, color: "#1a1a2e", background: "#e8a33d", padding: "3px 10px", borderRadius: 100 }}>₹{linkedItem.price} · Tap to add</span>
-                            </div>
-                          )}
+                          {linkedItem && (() => {
+                            const dp = computeOfferPrice(banner, linkedItem);
+                            return (
+                              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+                                <span style={{ fontSize: 12.5, color: "rgba(255,255,255,0.9)", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 160 }}>{linkedItem.name}</span>
+                                {dp != null ? (
+                                  <span style={{ fontSize: 12.5, fontWeight: 800, color: "#1a1a2e", background: "#e8a33d", padding: "3px 10px", borderRadius: 100, display: "flex", alignItems: "center", gap: 6 }}>
+                                    ₹{dp} <s style={{ opacity: 0.6, fontWeight: 600 }}>₹{linkedItem.price}</s> · {banner.discountPercent}% OFF
+                                  </span>
+                                ) : (
+                                  <span style={{ fontSize: 12.5, fontWeight: 800, color: "#1a1a2e", background: "#e8a33d", padding: "3px 10px", borderRadius: 100 }}>₹{linkedItem.price} · Tap to add</span>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </div>
                       </div>
                     );
@@ -1570,20 +1755,6 @@ function TableContent() {
                 </div>
               )}
             </div>
-
-            {/* ===== PROMO BANNER (below Popular Picks, image only) ===== */}
-            {promoBanner?.imageUrl && !addingMore && (
-              <div style={{ padding: "0 20px 24px" }}>
-                <div
-                  onClick={() => {
-                    if (promoBanner.linkedItemId) { addToCart(promoBanner.linkedItemId, 1); setShowCartSummary(true); }
-                  }}
-                  style={{ position: "relative", borderRadius: 20, overflow: "hidden", cursor: promoBanner.linkedItemId ? "pointer" : "default" }}
-                >
-                  <img src={promoBanner.imageUrl} alt="Special" style={{ width: "100%", height: "auto", display: "block", borderRadius: 20 }} />
-                </div>
-              </div>
-            )}
 
             {/* ===== MORE TO EXPLORE (ALL items with filter) ===== */}
             <div style={{ padding: "0 20px 24px" }}>
