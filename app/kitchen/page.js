@@ -1,16 +1,5 @@
 "use client";
-// REPLACES your existing app/kitchen/page.js entirely.
-// Changes vs your previous version:
-// 1. VIP orders sort to the top of each column (confirmed/preparing/ready).
-// 2. Each item row shows spice level + special-request notes if present.
-// 3. Start Cooking / Mark Ready buttons now have real, self-contained CSS
-//    (no dependency on a global .btn class existing anywhere else).
-// 4. Default cooking timer is 20 minutes, plus quick preset buttons
-//    (10/15/20/25/30) that start cooking with one tap.
-// 5. The moment an order becomes "confirmed" (i.e. the receptionist just
-//    confirmed it), this page automatically prints a Kitchen Order Ticket
-//    (KOT) to whatever printer is set up on this device — see the
-//    printKitchenTicket() function and the NOTE below it.
+
 
 import { useEffect, useState, useRef } from "react";
 import { db } from "@/lib/firebase";
@@ -18,6 +7,8 @@ import { AuthGuard } from "@/lib/auth-guard";
 import { useAuth } from "@/lib/auth-context";
 import { requestNotificationPermission, showPopupNotification } from "@/lib/notifications";
 import { collection, onSnapshot, query, orderBy, doc, updateDoc } from "firebase/firestore";
+
+const MAX_CONCURRENT_PREPARING = 5;
 
 export default function KitchenPageWrapper() {
   return (
@@ -271,6 +262,7 @@ function KitchenPage() {
   const [banner, setBanner] = useState(null);
 
   const prevConfirmedIds = useRef(null);
+  const autoPromotingRef = useRef(new Set()); // in-flight lock so the auto-promote effect can't double-write the same order
   const DEFAULT_ETA = 20;
   const ETA_PRESETS = [10, 15, 20, 25, 30];
 
@@ -337,42 +329,98 @@ function KitchenPage() {
   async function markReady(id) {
     await updateDoc(doc(db, "restaurants", restaurantId, "orders", id), { status: "ready" });
   }
+  // NEW: bump a running timer's total duration without resetting preparingAt —
+  // the countdown recalculates from (original start time + new duration), so
+  // extending/shortening mid-cook doesn't restart the clock.
+  async function adjustEta(id, currentEta, delta) {
+    const next = Math.max(1, (currentEta || DEFAULT_ETA) + delta);
+    await updateDoc(doc(db, "restaurants", restaurantId, "orders", id), { etaMinutes: next });
+  }
+  async function setEtaExact(id, currentEta) {
+    const input = window.prompt("New ETA in minutes:", String(currentEta || DEFAULT_ETA));
+    if (input === null) return;
+    const n = parseInt(input);
+    if (!isNaN(n) && n > 0) {
+      await updateDoc(doc(db, "restaurants", restaurantId, "orders", id), { etaMinutes: n });
+    }
+  }
+
+  // NEW: auto-start queue. Whenever there's an open slot (fewer than
+  // MAX_CONCURRENT_PREPARING orders cooking) AND at least one order waiting
+  // in "confirmed", promote the front of the queue (VIP first, then oldest)
+  // straight to "preparing" using its reception-computed presetEtaMinutes —
+  // zero clicks. Re-runs every time the preparing count changes (an order
+  // clears) or the queue's front order changes (a new one arrives, or the
+  // previous front just got promoted), so it naturally drains the whole
+  // backlog one at a time as slots free up.
+  useEffect(() => {
+    if (!restaurantId) return;
+    if (preparing.length >= MAX_CONCURRENT_PREPARING) return;
+    const next = confirmed[0];
+    if (!next) return;
+    if (autoPromotingRef.current.has(next.id)) return;
+    autoPromotingRef.current.add(next.id);
+    const mins = next.presetEtaMinutes || DEFAULT_ETA;
+    updateDoc(doc(db, "restaurants", restaurantId, "orders", next.id), { status: "preparing", etaMinutes: mins, preparingAt: Date.now() })
+      .catch((e) => console.error("Auto-start failed:", e))
+      .finally(() => autoPromotingRef.current.delete(next.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preparing.length, confirmed[0]?.id, restaurantId]);
 
   const columns = [
-    { key: "confirmed", label: "Needs ETA", icon: "⏳", color: "#f59e0b", bg: "#fef3c7", fg: "#92400e", list: confirmed, empty: { icon: "☕", msg: "Nothing waiting — time for a break!" } },
+    { key: "confirmed", label: "Waiting to Start", icon: "🕒", color: "#f59e0b", bg: "#fef3c7", fg: "#92400e", list: confirmed, empty: { icon: "☕", msg: "Nothing waiting — new orders start cooking automatically." } },
     { key: "preparing", label: "On the Stove", icon: "🔥", color: "#3b82f6", bg: "#dbeafe", fg: "#1e40af", list: preparing, empty: { icon: "🍳", msg: "Nothing on the stove right now." } },
     { key: "ready", label: "Ready for Pickup", icon: "✅", color: "#22c55e", bg: "#dcfce7", fg: "#166534", list: ready, empty: { icon: "🍽️", msg: "Nothing plated yet." } },
   ];
 
   function renderTicketActions(type, order) {
     if (type === "confirmed") {
+      const atCapacity = preparing.length >= MAX_CONCURRENT_PREPARING;
+      const defaultEta = order.presetEtaMinutes || DEFAULT_ETA;
       return (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{
+            fontSize: 12, fontWeight: 700, padding: "8px 12px", borderRadius: 10,
+            background: atCapacity ? "#fef2f2" : "#eff6ff", color: atCapacity ? "#b91c1c" : "#1d4ed8",
+          }}>
+            {atCapacity
+              ? `🔥 Kitchen at capacity (${preparing.length}/${MAX_CONCURRENT_PREPARING}) — will auto-start the moment a slot frees, or start it now below.`
+              : `⚡ Preset ETA ${defaultEta}m — starting automatically…`}
+          </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
             {ETA_PRESETS.map((m) => (
               <button
                 key={m}
                 className="btn-preset"
                 onClick={() => startCooking(order.id, m)}
-                style={{ flex: isMobile ? "1 1 60px" : "0 0 auto" }}
+                style={{ flex: isMobile ? "1 1 60px" : "0 0 auto", ...(m === defaultEta ? { background: "#3b82f6", color: "#fff" } : {}) }}
               >
                 {m}m
               </button>
             ))}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: isMobile ? "wrap" : "nowrap" }}>
-            <input type="number" placeholder={String(DEFAULT_ETA)} defaultValue={DEFAULT_ETA} onChange={(e) => setEtaInputs((prev) => ({ ...prev, [order.id]: e.target.value }))}
+            <input type="number" placeholder={String(defaultEta)} defaultValue={defaultEta} onChange={(e) => setEtaInputs((prev) => ({ ...prev, [order.id]: e.target.value }))}
               style={{ width: isMobile ? 64 : 70, padding: isMobile ? "12px 10px" : "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", fontSize: 15, fontWeight: 600, textAlign: "center" }} />
             <span style={{ color: "var(--text-secondary)", fontSize: 14 }}>min (custom)</span>
-            <button className="btn btn-primary" onClick={() => startCooking(order.id)} style={{ marginLeft: isMobile ? 0 : "auto", flex: isMobile ? "1 1 auto" : "none" }}>
-              ▶ Start Cooking
+            <button className="btn btn-primary" onClick={() => startCooking(order.id, parseInt(etaInputs[order.id]) || defaultEta)} style={{ marginLeft: isMobile ? 0 : "auto", flex: isMobile ? "1 1 auto" : "none" }}>
+              ▶ Start Preparing Now
             </button>
           </div>
         </div>
       );
     }
     if (type === "preparing") {
-      return <button className="btn btn-success" onClick={() => markReady(order.id)} style={{ width: "100%" }}>✓ Mark Ready for Pickup</button>;
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <button className="btn-preset" onClick={() => adjustEta(order.id, order.etaMinutes, -5)}>-5m</button>
+            <button className="btn-preset" onClick={() => adjustEta(order.id, order.etaMinutes, 5)}>+5m</button>
+            <button className="btn-preset" onClick={() => setEtaExact(order.id, order.etaMinutes)}>✎ Set</button>
+          </div>
+          <button className="btn btn-success" onClick={() => markReady(order.id)} style={{ width: "100%" }}>✓ Mark Ready for Pickup</button>
+        </div>
+      );
     }
     return <div style={{ background: "#dcfce7", color: "#166534", padding: "12px 16px", borderRadius: 10, textAlign: "center", fontWeight: 600, fontSize: 14 }}>Waiting for server pickup</div>;
   }
@@ -441,7 +489,10 @@ function KitchenPage() {
             {!isMobile && (
               <div style={{ display: "flex", gap: 16, fontSize: 14 }}>
                 <div style={{ textAlign: "center" }}><div style={{ fontSize: 22, fontWeight: 800 }}>{confirmed.length}</div><div style={{ opacity: 0.7 }}>Waiting</div></div>
-                <div style={{ textAlign: "center" }}><div style={{ fontSize: 22, fontWeight: 800 }}>{preparing.length}</div><div style={{ opacity: 0.7 }}>Cooking</div></div>
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontSize: 22, fontWeight: 800, color: preparing.length >= MAX_CONCURRENT_PREPARING ? "#fca5a5" : "#fff" }}>{preparing.length}/{MAX_CONCURRENT_PREPARING}</div>
+                  <div style={{ opacity: 0.7 }}>Cooking</div>
+                </div>
                 <div style={{ textAlign: "center" }}><div style={{ fontSize: 22, fontWeight: 800 }}>{ready.length}</div><div style={{ opacity: 0.7 }}>Ready</div></div>
               </div>
             )}

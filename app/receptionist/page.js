@@ -298,6 +298,10 @@ function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, e
             </select>
           </div>
           <div>
+            <label style={labelStyle}>Prep Time (min)</label>
+            <input type="number" min="1" placeholder="15" value={editForm.etaMinutes ?? ""} onChange={(e) => setEditForm((p) => ({ ...p, etaMinutes: e.target.value }))} style={inputStyle} />
+          </div>
+          <div>
             <label style={labelStyle}>Photo</label>
             <input ref={editFileInputRef} type="file" accept="image/*" onChange={(e) => handleImageUpload(e.target.files[0], true)} style={{ display: "none" }} />
             <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
@@ -362,6 +366,7 @@ function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, e
           </div>
         </div>
         {item.description && <div style={{ fontSize: 12.5, color: "var(--text-secondary, #6b6b7b)", marginTop: 4, flex: 1 }}>{item.description}</div>}
+        <div style={{ fontSize: 11, color: "#888", marginTop: 6, fontWeight: 600 }}>⏱ {item.etaMinutes || 15} min prep</div>
         <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
           <button onClick={() => toggleAvailable(item)} className="btn btn-sm" style={{ background: item.available ? "var(--success-light, #dcfce7)" : "var(--warning-light, #fef3c7)", color: item.available ? "#166534" : "#92400e", border: "none", flex: 1, minWidth: 90 }}>{item.available ? "In Stock" : "Out"}</button>
           <button onClick={() => toggleFeatured(item)} className="btn btn-sm" style={{ background: item.featured ? "#e8a33d20" : "var(--surface-2, #f3efe6)", color: item.featured ? "#92400e" : "var(--text-secondary, #6b6b7b)", border: "none" }} title="Toggle featured">★</button>
@@ -406,7 +411,7 @@ function ReceptionPage() {
   const [savedMsg, setSavedMsg] = useState(false);
   const [editingProfile, setEditingProfile] = useState(false); // profile card starts collapsed; opens on "Edit Profile"
   const [menuItems, setMenuItems] = useState([]);
-  const [newItem, setNewItem] = useState({ name: "", description: "", price: "", category: "", imageUrl: "", chefSpecial: false, foodType: "veg", variations: [], addons: [], bogoEnabled: false });
+  const [newItem, setNewItem] = useState({ name: "", description: "", price: "", category: "", imageUrl: "", chefSpecial: false, foodType: "veg", variations: [], addons: [], bogoEnabled: false, etaMinutes: "" });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [billing, setBilling] = useState({ taxPercent: 5, servicePercent: 0, upiId: "", upiSelfPayEnabled: false });
@@ -839,7 +844,27 @@ function ReceptionPage() {
   }
 
   // === order actions ===
-  async function confirmOrder(id) { await updateDoc(doc(db, "restaurants", restaurantId, "orders", id), { status: "confirmed" }); }
+  // NEW: when reception confirms an order, work out how long the kitchen
+  // needs — the LONGEST prep time among the order's items, since that item
+  // is the bottleneck for the whole ticket. Falls back to 15 min per item if
+  // it was never given a prep time. Kitchen picks this up as presetEtaMinutes
+  // and either auto-starts the countdown immediately (if it has capacity) or
+  // pre-fills the "Start Preparing" button with it — reception never has to
+  // think about kitchen timing at all.
+  function computeOrderEta(items) {
+    let maxEta = 15;
+    (items || []).forEach((it) => {
+      const mi = menuItems.find((m) => m.id === it.itemId || m.name === it.name);
+      const eta = (mi && mi.etaMinutes) || 15;
+      if (eta > maxEta) maxEta = eta;
+    });
+    return maxEta;
+  }
+  async function confirmOrder(id) {
+    const order = orders.find((o) => o.id === id);
+    const presetEtaMinutes = computeOrderEta(order?.items);
+    await updateDoc(doc(db, "restaurants", restaurantId, "orders", id), { status: "confirmed", presetEtaMinutes });
+  }
   async function declineOrder(id) { await deleteDoc(doc(db, "restaurants", restaurantId, "orders", id)); }
   async function markServed(id) { await updateDoc(doc(db, "restaurants", restaurantId, "orders", id), { status: "served" }); }
 
@@ -1121,10 +1146,11 @@ function ReceptionPage() {
       name: newItem.name, description: newItem.description, price: parseFloat(newItem.price), category: newItem.category,
       imageUrl: newItem.imageUrl, available: true, featured: false, chefSpecial: !!newItem.chefSpecial,
       foodType: newItem.foodType, isCombo: false, bogoEnabled: !!newItem.bogoEnabled,
+      etaMinutes: parseInt(newItem.etaMinutes) || 15,
       variations: cleanRows(newItem.variations), addons: cleanRows(newItem.addons),
       createdAt: Date.now(),
     });
-    setNewItem({ name: "", description: "", price: "", category: newItem.category, imageUrl: "", chefSpecial: false, foodType: "veg", variations: [], addons: [], bogoEnabled: false });
+    setNewItem({ name: "", description: "", price: "", category: newItem.category, imageUrl: "", chefSpecial: false, foodType: "veg", variations: [], addons: [], bogoEnabled: false, etaMinutes: "" });
   }
   async function addCombo() {
     if (!newCombo.name || !newCombo.price) return alert("Combo name and price are required");
@@ -1142,6 +1168,7 @@ function ReceptionPage() {
       name: editForm.name, description: editForm.description, price: parseFloat(editForm.price), category: editForm.category,
       imageUrl: editForm.imageUrl, featured: editForm.featured ?? false, chefSpecial: editForm.chefSpecial ?? false,
       foodType: editForm.foodType || "veg", bogoEnabled: editForm.bogoEnabled ?? false,
+      etaMinutes: parseInt(editForm.etaMinutes) || 15,
       variations: cleanRows(editForm.variations), addons: cleanRows(editForm.addons),
     });
     setEditingId(null);
@@ -2925,7 +2952,14 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                 {categories.filter((c) => c.name !== COMBO_CATEGORY).map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
               </select>
             </div>
+            <div>
+              <label style={labelStyle}>Prep Time (min)</label>
+              <input placeholder="15" type="number" min="1" value={newItem.etaMinutes} onChange={(e) => setNewItem((p) => ({ ...p, etaMinutes: e.target.value }))} style={inputStyle} />
+            </div>
           </div>
+          <p style={{ fontSize: 11.5, color: "#999", marginTop: -8, marginBottom: 14 }}>
+            How long the kitchen typically takes to cook this item. Drives the auto-starting countdown timer on the Kitchen Display — defaults to 15 min if left blank.
+          </p>
 
           <label style={labelStyle}>Food Type *</label>
           <FoodTypeToggle value={newItem.foodType} onChange={(v) => setNewItem((p) => ({ ...p, foodType: v }))} />
