@@ -209,7 +209,23 @@ function OrderCard({ order, children, onMoveClick }) {
   );
 }
 
-function FoodTypeToggle({ value, onChange }) {
+function FoodTypeToggle({ value, onChange, pureVeg }) {
+  // NEW: when the restaurant is running in Pure Veg mode (Settings → Menu
+  // Intelligence), non-veg is not a concept that should exist anywhere in
+  // the system — so instead of a veg/non-veg picker we just show a locked
+  // "Veg" badge and never let foodType become anything but "veg".
+  if (pureVeg) {
+    return (
+      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 100, border: "2px solid #16a34a", background: "#16a34a15", fontSize: 13, fontWeight: 700, color: "#166534" }}>
+          <span style={{ width: 12, height: 12, border: "1.5px solid #16a34a", borderRadius: 3, position: "relative", display: "inline-block" }}>
+            <span style={{ position: "absolute", inset: 1.5, borderRadius: "50%", background: "#16a34a" }} />
+          </span>
+          🌱 Pure Veg Kitchen
+        </div>
+      </div>
+    );
+  }
   return (
     <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
       {[["veg", "Veg", "#16a34a"], ["nonveg", "Non-veg", "#dc2626"]].map(([val, label, color]) => (
@@ -278,7 +294,7 @@ function VariationsAddonsEditor({ form, setForm }) {
   );
 }
 
-function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, editFileInputRef, handleImageUpload, categories, saveEdit, cancelEdit, toggleAvailable, toggleFeatured, toggleChefSpecial, startEdit, deleteItem }) {
+function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, editFileInputRef, handleImageUpload, categories, saveEdit, cancelEdit, toggleAvailable, toggleFeatured, toggleChefSpecial, startEdit, deleteItem, pureVeg }) {
   if (isEditing) {
     return (
       <div className="card" style={{ padding: 16, borderRadius: 14, gridColumn: "1 / -1" }}>
@@ -313,7 +329,7 @@ function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, e
         <label style={labelStyle}>Description</label>
         <input value={editForm.description} onChange={(e) => setEditForm((p) => ({ ...p, description: e.target.value }))} style={inputStyle} />
         <label style={labelStyle}>Food Type</label>
-        <FoodTypeToggle value={editForm.foodType || "veg"} onChange={(v) => setEditForm((p) => ({ ...p, foodType: v }))} />
+        <FoodTypeToggle value={editForm.foodType || "veg"} onChange={(v) => setEditForm((p) => ({ ...p, foodType: v }))} pureVeg={pureVeg} />
         <VariationsAddonsEditor form={editForm} setForm={setEditForm} />
         <div style={{ display: "flex", gap: 16, marginBottom: 12, flexWrap: "wrap" }}>
           <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
@@ -356,9 +372,11 @@ function MenuItemCard({ item, isEditing, editForm, setEditForm, editUploading, e
       <div style={{ padding: 14, flex: 1, display: "flex", flexDirection: "column" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ width: 12, height: 12, border: `1.5px solid ${item.foodType === "nonveg" ? "#dc2626" : "#16a34a"}`, borderRadius: 3, position: "relative", display: "inline-block", flexShrink: 0 }}>
-              <span style={{ position: "absolute", inset: 1.5, borderRadius: "50%", background: item.foodType === "nonveg" ? "#dc2626" : "#16a34a" }} />
-            </span>
+            {!pureVeg && (
+              <span style={{ width: 12, height: 12, border: `1.5px solid ${item.foodType === "nonveg" ? "#dc2626" : "#16a34a"}`, borderRadius: 3, position: "relative", display: "inline-block", flexShrink: 0 }}>
+                <span style={{ position: "absolute", inset: 1.5, borderRadius: "50%", background: item.foodType === "nonveg" ? "#dc2626" : "#16a34a" }} />
+              </span>
+            )}
             <div style={{ fontWeight: 700, fontSize: 15 }}>{item.name}</div>
           </div>
           <div style={{ fontWeight: 800, fontSize: 15, color: "#e8a33d", whiteSpace: "nowrap" }}>
@@ -493,13 +511,20 @@ function ReceptionPage() {
   const [posTable, setPosTable] = useState(null);
   const [posCategoryTab, setPosCategoryTab] = useState("all");
   const [posSearch, setPosSearch] = useState("");
-  const [posCart, setPosCart] = useState({}); // { itemId: qty }
+  // NEW: keyed by a composite line key (item + chosen size + chosen add-ons)
+  // instead of just itemId, so the same dish ordered in two different sizes,
+  // or with different add-ons, shows as separate cart lines. See posLineKey().
+  const [posCart, setPosCart] = useState({}); // { lineKey: { itemId, key, name, price, qty, variationId, addonIds } }
   const [posNotes, setPosNotes] = useState("");
   const [posSending, setPosSending] = useState(false);
+  // NEW: when a POS item has size variations and/or add-ons, tapping it opens
+  // this picker instead of adding straight to the cart — mirrors the same
+  // "choose size / choose add-ons" flow the customer-facing table page uses.
+  const [posVariantModal, setPosVariantModal] = useState(null); // { item, variationId, addonIds, qty }
 
   // --- NEW: extra settings (bar toggle + badge thresholds) ---
-  const [siteSettings, setSiteSettings] = useState({ hasBar: false, thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50 });
-  const [siteSettingsForm, setSiteSettingsForm] = useState({ hasBar: false, thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50 });
+  const [siteSettings, setSiteSettings] = useState({ hasBar: false, pureVeg: false, thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50 });
+  const [siteSettingsForm, setSiteSettingsForm] = useState({ hasBar: false, pureVeg: false, thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50 });
   const [siteSettingsSaved, setSiteSettingsSaved] = useState(false);
 
   // --- NEW: Offer Carousel (replaces the old auto Hero Carousel) ---
@@ -509,10 +534,11 @@ function ReceptionPage() {
   const [offerBannerUploading, setOfferBannerUploading] = useState(false);
   const offerBannerFileInputRef = useRef(null);
 
-  // --- NEW: optional customer capture at bill time + payment method picker ---
-  const [billCustomerOrder, setBillCustomerOrder] = useState(null); // { order, withQr }
-  const [billCustomerForm, setBillCustomerForm] = useState({ name: "", phone: "" });
-  const [paymentMethodOrder, setPaymentMethodOrder] = useState(null); // order pending a payment-method choice
+  // --- NEW: unified Generate Bill flow — customer capture + payment method,
+  // collected together up front instead of asking payment method later at
+  // Mark Paid time. See billFlowModal / openGenerateBill / generateBill.
+  const [billFlowOrder, setBillFlowOrder] = useState(null); // order pending bill generation
+  const [billFlowForm, setBillFlowForm] = useState({ name: "", phone: "", paymentMethod: "cash" });
 
   // --- NEW: CRM — customers collection, keyed by phone ---
   const [customers, setCustomers] = useState([]);
@@ -585,7 +611,7 @@ function ReceptionPage() {
     const unsub = onSnapshot(doc(db, "restaurants", restaurantId, "info", "settings"), (snap) => {
       if (snap.exists()) {
         const d = snap.data();
-        const merged = { hasBar: !!d.hasBar, thresholdMostLoved: d.thresholdMostLoved ?? 4.5, thresholdMostOrdered: d.thresholdMostOrdered ?? 100, thresholdMostRated: d.thresholdMostRated ?? 50 };
+        const merged = { hasBar: !!d.hasBar, pureVeg: !!d.pureVeg, thresholdMostLoved: d.thresholdMostLoved ?? 4.5, thresholdMostOrdered: d.thresholdMostOrdered ?? 100, thresholdMostRated: d.thresholdMostRated ?? 50 };
         setSiteSettings(merged); setSiteSettingsForm(merged);
       }
     });
@@ -886,6 +912,7 @@ function ReceptionPage() {
   async function saveSiteSettings() {
     await setDoc(doc(db, "restaurants", restaurantId, "info", "settings"), {
       hasBar: !!siteSettingsForm.hasBar,
+      pureVeg: !!siteSettingsForm.pureVeg,
       thresholdMostLoved: parseFloat(siteSettingsForm.thresholdMostLoved) || 4.5,
       thresholdMostOrdered: parseInt(siteSettingsForm.thresholdMostOrdered) || 100,
       thresholdMostRated: parseInt(siteSettingsForm.thresholdMostRated) || 50,
@@ -952,6 +979,9 @@ function ReceptionPage() {
 
     const customerName = (customerInfo?.name || "").trim();
     const customerPhone = (customerInfo?.phone || "").trim();
+    // NEW: payment method is now collected up front, as part of Generate Bill,
+    // instead of being asked again later at Mark Paid time.
+    const paymentMethod = customerInfo?.paymentMethod || null;
 
     const billPayload = {
       status: "billed", items: rawItems, billSubtotal: subtotal, billDiscounts: bundleDiscounts, billDiscountTotal: discountTotal,
@@ -962,6 +992,7 @@ function ReceptionPage() {
       mergedTables: ordersToBill.length > 1 ? ordersToBill.map((ord) => ord.table) : null,
       customerName: customerName || null,
       customerPhone: customerPhone || null,
+      paymentMethod: paymentMethod,
     };
     // Every order in the group gets the SAME consolidated bill written onto it —
     // that way each table's own device (each listens only to its own table number)
@@ -1006,12 +1037,11 @@ function ReceptionPage() {
     }
   }
 
-  // NEW: opens the optional customer-details modal before actually generating
-  // the bill. "Skip & Generate" still generates the bill immediately, just
-  // without any CRM data attached to it.
-  function openGenerateBill(o, withQr) {
-    setBillCustomerForm({ name: "", phone: "" });
-    setBillCustomerOrder({ order: o, withQr });
+  // NEW: opens the unified Generate Bill modal — customer details + payment
+  // method are chosen together, before the bill is written at all.
+  function openGenerateBill(o) {
+    setBillFlowForm({ name: "", phone: "", paymentMethod: "cash" });
+    setBillFlowOrder(o);
   }
 
   async function markPaid(id, method = "cash") {
@@ -1034,12 +1064,15 @@ function ReceptionPage() {
     await updateDoc(doc(db, "restaurants", restaurantId, "orders", id), { status: "paid", paymentMethod: method });
   }
 
-  // NEW: opens the payment-method picker before finalizing Mark Paid.
-  function openMarkPaid(order) { setPaymentMethodOrder(order); }
-  async function confirmMarkPaid(method) {
-    if (!paymentMethodOrder) return;
-    await markPaid(paymentMethodOrder.id, method);
-    setPaymentMethodOrder(null);
+  // NEW: payment method was already collected at Generate Bill time, so
+  // Mark Paid just confirms and finalizes using that stored value — no
+  // second prompt. Falls back to "cash" only for older bills generated
+  // before this flow existed (paymentMethod not yet set on them).
+  async function handleMarkPaidClick(order) {
+    const method = order.paymentMethod || "cash";
+    const methodLabel = PAYMENT_METHODS.find((m) => m.key === method)?.label || method;
+    if (!confirm(`Mark Table ${order.table}'s bill (₹${order.billTotal}) as paid via ${methodLabel}?`)) return;
+    await markPaid(order.id, method);
   }
 
   function printBill(o) {
@@ -1054,6 +1087,8 @@ function ReceptionPage() {
         </div>`).join("");
     const qrHtml = o.paymentQrUrl ? `<div style="text-align:center;margin-top:16px;"><img src="${o.paymentQrUrl}" style="width:160px;" /><div style="font-size:11px;color:#888;margin-top:6px;">Scan to pay via UPI</div></div>` : "";
     const customerHtml = (o.customerName || o.customerPhone) ? `<div class="sub">👤 ${o.customerName || ""} ${o.customerPhone || ""}</div>` : "";
+    const paymentMethodLabel = o.paymentMethod ? (PAYMENT_METHODS.find((m) => m.key === o.paymentMethod)?.label || o.paymentMethod) : "";
+    const paymentHtml = paymentMethodLabel ? `<div class="sub">💳 Paid via ${paymentMethodLabel}</div>` : "";
     const html = `
       <html><head><title>Bill - Table ${o.table}</title>
         <style>
@@ -1071,6 +1106,7 @@ function ReceptionPage() {
         <div class="sub">${profile?.tagline || ""}</div>
         <div class="sub">Table ${o.table} - ${new Date(o.createdAt).toLocaleString()}</div>
         ${customerHtml}
+        ${paymentHtml}
         <div class="line"></div>
         ${itemsHtml}
         <div class="line"></div>
@@ -1389,6 +1425,7 @@ function ReceptionPage() {
     return s === "true" || s === "yes" || s === "1" || s === "y";
   }
   function normalizeFoodType(val) {
+    if (siteSettings.pureVeg) return "veg"; // Pure Veg restaurants never get a non-veg item in, no matter what the import file says
     if (!val) return "veg";
     const s = String(val).toLowerCase().trim();
     if (s.includes("non")) return "nonveg";
@@ -1780,14 +1817,48 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     }
   }
 
-  // === NEW: POS actions ===
-  function posAddItem(item) { setPosCart((p) => ({ ...p, [item.id]: (p[item.id] || 0) + 1 })); }
-  function posRemoveItem(item) { setPosCart((p) => { const n = { ...p }; if (n[item.id] > 1) n[item.id]--; else delete n[item.id]; return n; }); }
+  // === NEW: POS actions — now variation/add-on aware, same as the customer
+  // table-side ordering flow. An item with no sizes and no add-ons still adds
+  // straight to the cart with one tap; an item with either opens a picker.
+  function posItemHasOptions(item) {
+    return (item.variations && item.variations.length > 0) || (item.addons && item.addons.length > 0);
+  }
+  function posLineKey(itemId, variationId, addonIds) {
+    return `${itemId}::${variationId || "base"}::${(addonIds || []).slice().sort().join("+")}`;
+  }
+  // Opens the size/add-on picker for items that have options; adds directly
+  // (qty 1) for plain items — this is what the tile's "+" / "Select Options" button calls.
+  function posTapItem(item) {
+    if (!posItemHasOptions(item)) { posAddLine(item, null, [], 1); return; }
+    setPosVariantModal({ item, variationId: item.variations?.[0]?.id || null, addonIds: [], qty: 1 });
+  }
+  function posAddLine(item, variationId, addonIds, qty) {
+    const variation = (item.variations || []).find((v) => v.id === variationId);
+    const addons = (item.addons || []).filter((a) => (addonIds || []).includes(a.id));
+    const basePrice = variation ? variation.price : item.price;
+    const addonsTotal = addons.reduce((s, a) => s + a.price, 0);
+    const price = basePrice + addonsTotal;
+    const key = posLineKey(item.id, variationId, addonIds);
+    const name = item.name + (variation ? ` (${variation.name})` : "") + (addons.length ? ` + ${addons.map((a) => a.name).join(", ")}` : "");
+    setPosCart((p) => {
+      const existing = p[key];
+      return { ...p, [key]: { itemId: item.id, key, name, price, qty: (existing?.qty || 0) + qty, variationId: variationId || null, addonIds: addonIds || [] } };
+    });
+  }
+  function posAdjustLineQty(key, delta) {
+    setPosCart((p) => {
+      const line = p[key];
+      if (!line) return p;
+      const nextQty = line.qty + delta;
+      if (nextQty <= 0) { const n = { ...p }; delete n[key]; return n; }
+      return { ...p, [key]: { ...line, qty: nextQty } };
+    });
+  }
+  // Simple (no size/add-ons) items still get quick +/- on the tile itself.
+  function posSimpleQtyFor(item) { return posCart[posLineKey(item.id, null, [])]?.qty || 0; }
+  function posTotalQtyFor(item) { return Object.values(posCart).filter((l) => l.itemId === item.id).reduce((s, l) => s + l.qty, 0); }
   function posCartLines() {
-    return Object.entries(posCart).map(([id, qty]) => {
-      const mi = menuItems.find((m) => m.id === id);
-      return mi ? { itemId: id, name: mi.name, price: mi.price, qty } : null;
-    }).filter(Boolean);
+    return Object.values(posCart).map((l) => ({ itemId: l.itemId, key: l.key, name: l.name, price: l.price, qty: l.qty }));
   }
   const posLines = posCartLines();
   const posSubtotal = posLines.reduce((s, l) => s + l.price * l.qty, 0);
@@ -1833,6 +1904,146 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     const topItems = Object.entries(itemCounts).sort((a, b) => b[1] - a[1]).slice(0, 8);
 
     return { totalSales, orderCount, avg, hourBuckets, peakHour, topItems, inRange };
+  }
+
+  // NEW: shared human-readable label for the analytics filter — used on the
+  // Order History / Items Sold export & print reports so it's obvious which
+  // date range the report covers.
+  function filterLabel(filterKey) {
+    return { today: "Today", "3days": "Last 3 Days", week: "Last Week", month: "Last Month" }[filterKey] || "All Time";
+  }
+
+  // === NEW: Order History — Export CSV + colour-highlighted Print report,
+  // mirroring the Sales Analytics report but scoped to every order (not just
+  // billed ones) in the currently selected date range.
+  function exportOrdersHistoryCSV(filterKey) {
+    const start = filterRangeStart(filterKey);
+    const list = orders.filter((o) => o.createdAt >= start).sort((a, b) => b.createdAt - a.createdAt);
+    const statusCounts = {};
+    list.forEach((o) => { statusCounts[o.status] = (statusCounts[o.status] || 0) + 1; });
+    const rows = [
+      ["Order History Report", profile?.name || "", filterLabel(filterKey), new Date().toLocaleDateString()], [],
+      ["SUMMARY"],
+      ["Total Orders", list.length],
+      ...Object.entries(statusCounts).map(([s, c]) => [`  · ${s.replace("_", " ")}`, c]),
+      [],
+      ["ORDER LOG"],
+      ["Table", "Date/Time", "Status", "Type", "Items", "Total"],
+      ...list.map((o) => [
+        o.table, new Date(o.createdAt).toLocaleString(), o.status.replace("_", " "), o.orderType || "dinein",
+        (o.items || []).map((it) => `${it.name} x${it.qty}`).join("; "), o.billTotal || "",
+      ]),
+    ];
+    const csv = rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `order-history-${filterKey}-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function printOrdersHistoryReport(filterKey) {
+    const start = filterRangeStart(filterKey);
+    const list = orders.filter((o) => o.createdAt >= start).sort((a, b) => b.createdAt - a.createdAt);
+    const statusColors = { pending: "#f59e0b", confirmed: "#3b82f6", preparing: "#3b82f6", ready: "#3b82f6", served: "#6b7280", bill_requested: "#e8a33d", billed: "#8b5cf6", paid: "#16a34a", cancelled: "#dc2626", declined: "#dc2626" };
+    const statusCounts = {};
+    list.forEach((o) => { statusCounts[o.status] = (statusCounts[o.status] || 0) + 1; });
+    const statusChipsHtml = Object.entries(statusCounts).map(([s, c]) => `<span class="chip" style="background:${(statusColors[s] || "#888")}18;color:${statusColors[s] || "#888"};border:1px solid ${(statusColors[s] || "#888")}55">${s.replace("_", " ")} · ${c}</span>`).join("");
+    const rowsHtml = list.map((o) => `
+      <tr>
+        <td>${o.table}${o.isVIP ? ' <span class="vip">★ VIP</span>' : ""}</td>
+        <td>${new Date(o.createdAt).toLocaleString()}</td>
+        <td><span class="status" style="background:${(statusColors[o.status] || "#888")}18;color:${statusColors[o.status] || "#888"}">${o.status.replace("_", " ")}</span></td>
+        <td>${o.orderType === "takeaway" ? "📦 Takeaway" : "Dine-in"}</td>
+        <td>${(o.items || []).map((it) => `${it.name} x${it.qty}`).join(", ")}</td>
+        <td style="text-align:right">${o.billTotal ? "₹" + o.billTotal.toLocaleString() : "-"}</td>
+      </tr>`).join("");
+    const html = `<html><head><title>Order History — ${filterLabel(filterKey)}</title>
+      <style>
+        body{font-family:'Inter',sans-serif;max-width:900px;margin:24px auto;color:#1a1a2e;}
+        h1{font-size:22px;margin-bottom:2px;color:#3b82f6;} .sub{color:#888;font-size:12px;margin-bottom:20px;}
+        .stats{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:18px;}
+        .stat{background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:12px;}
+        .stat .label{font-size:11px;color:#1e40af;text-transform:uppercase;font-weight:700;}
+        .stat .value{font-size:22px;font-weight:800;margin-top:4px;color:#1e3a8a;}
+        .chip{display:inline-block;padding:4px 10px;border-radius:100px;font-size:11px;font-weight:700;text-transform:capitalize;margin:0 6px 6px 0;}
+        .status{padding:2px 9px;border-radius:100px;font-size:11px;font-weight:700;text-transform:capitalize;}
+        .vip{color:#eab308;font-weight:800;}
+        table{width:100%;border-collapse:collapse;margin-top:10px;font-size:12px;}
+        th,td{border-bottom:1px solid #eee;padding:7px 8px;text-align:left;} th{background:#f8f6f3;color:#555;text-transform:uppercase;font-size:10.5px;letter-spacing:0.3px;}
+        h3{font-size:14px;margin:18px 0 8px;}
+      </style></head><body>
+      <h1>📋 Order History Report</h1>
+      <div class="sub">${profile?.name || "Restaurant"} · ${filterLabel(filterKey)} · Generated ${new Date().toLocaleString()}</div>
+      <div class="stats">
+        <div class="stat"><div class="label">Total Orders</div><div class="value">${list.length}</div></div>
+        <div class="stat"><div class="label">Date Range</div><div class="value" style="font-size:16px">${filterLabel(filterKey)}</div></div>
+      </div>
+      <h3>By Status</h3>
+      <div>${statusChipsHtml || "<span>No orders yet</span>"}</div>
+      <h3>Order Log</h3>
+      <table><thead><tr><th>Table</th><th>Date/Time</th><th>Status</th><th>Type</th><th>Items</th><th style="text-align:right">Total</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="6">No orders in this period</td></tr>'}</tbody></table>
+      <script>window.onload=()=>window.print();</script></body></html>`;
+    const win = window.open("", "_blank", "width=950,height=900");
+    win.document.write(html); win.document.close();
+  }
+
+  // === NEW: Items Sold — Export CSV + colour-highlighted Print report.
+  function exportItemsSoldCSV(filterKey) {
+    const a = computeAnalytics(filterKey);
+    const rows = [
+      ["Items Sold Report", profile?.name || "", filterLabel(filterKey), new Date().toLocaleDateString()], [],
+      ["SUMMARY"],
+      ["Total Line Items Sold", a.topItems.reduce((s, [, qty]) => s + qty, 0)],
+      ["Distinct Items", a.topItems.length],
+      [],
+      ["ITEM", "QTY SOLD"],
+      ...a.topItems,
+    ];
+    const csv = rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a2 = document.createElement("a");
+    a2.href = url; a2.download = `items-sold-${filterKey}-${new Date().toISOString().slice(0, 10)}.csv`; a2.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function printItemsSoldReport(filterKey) {
+    const a = computeAnalytics(filterKey);
+    const totalQty = a.topItems.reduce((s, [, qty]) => s + qty, 0);
+    const maxQty = Math.max(...a.topItems.map(([, qty]) => qty), 1);
+    const rowsHtml = a.topItems.map(([name, qty], i) => `
+      <tr>
+        <td><span class="rank">${i + 1}</span></td>
+        <td>${name}</td>
+        <td style="text-align:right;font-weight:800;color:#166534">${qty}</td>
+        <td><div class="bar-track"><div class="bar" style="width:${Math.round((qty / maxQty) * 100)}%"></div></div></td>
+      </tr>`).join("");
+    const html = `<html><head><title>Items Sold — ${filterLabel(filterKey)}</title>
+      <style>
+        body{font-family:'Inter',sans-serif;max-width:820px;margin:24px auto;color:#1a1a2e;}
+        h1{font-size:22px;margin-bottom:2px;color:#16a34a;} .sub{color:#888;font-size:12px;margin-bottom:20px;}
+        .stats{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:20px;}
+        .stat{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:12px;}
+        .stat .label{font-size:11px;color:#166534;text-transform:uppercase;font-weight:700;}
+        .stat .value{font-size:22px;font-weight:800;margin-top:4px;color:#14532d;}
+        table{width:100%;border-collapse:collapse;font-size:13px;}
+        th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;vertical-align:middle;} th{background:#f8f6f3;color:#555;text-transform:uppercase;font-size:10.5px;}
+        .rank{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:#16a34a;color:#fff;font-size:11px;font-weight:800;}
+        .bar-track{width:140px;height:8px;background:#eee;border-radius:100px;overflow:hidden;}
+        .bar{height:100%;background:linear-gradient(90deg,#16a34a,#22c55e);border-radius:100px;}
+      </style></head><body>
+      <h1>🍽️ Items Sold Report</h1>
+      <div class="sub">${profile?.name || "Restaurant"} · ${filterLabel(filterKey)} · Generated ${new Date().toLocaleString()}</div>
+      <div class="stats">
+        <div class="stat"><div class="label">Total Units Sold</div><div class="value">${totalQty}</div></div>
+        <div class="stat"><div class="label">Distinct Items</div><div class="value">${a.topItems.length}</div></div>
+      </div>
+      <table><thead><tr><th>#</th><th>Item</th><th style="text-align:right">Qty Sold</th><th>Share</th></tr></thead>
+      <tbody>${rowsHtml || '<tr><td colspan="4">No items sold in this period</td></tr>'}</tbody></table>
+      <script>window.onload=()=>window.print();</script></body></html>`;
+    const win = window.open("", "_blank", "width=900,height=900");
+    win.document.write(html); win.document.close();
   }
 
   // === NEW: Daily Report export (CSV + printable PDF) ===
@@ -2015,8 +2226,17 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     return (
       <div>
         <button onClick={() => setDashboardView("main")} style={{ background: "none", border: "none", color: "#888", cursor: "pointer", fontSize: 13, fontWeight: 600, marginBottom: 16 }}>← Back to dashboard</button>
-        <h2 style={{ fontSize: 22, fontWeight: 800, marginBottom: 16 }}>Order History</h2>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
+          <h2 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>Order History</h2>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn btn-ghost" onClick={() => exportOrdersHistoryCSV(analyticsFilter)}>⬇ Export ({filterLabel(analyticsFilter)})</button>
+            <button className="btn btn-primary" onClick={() => printOrdersHistoryReport(analyticsFilter)}>🖨 Print / Save PDF</button>
+          </div>
+        </div>
         {renderAnalyticsFilterBar()}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px,1fr))", gap: 14, marginBottom: 20 }}>
+          <StatCard label="Total Orders" value={list.length} color="#3b82f6" sub={filterLabel(analyticsFilter)} />
+        </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {list.length === 0 && <p style={{ color: "#999" }}>No orders in this period.</p>}
           {list.map((o) => (
@@ -2051,8 +2271,17 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     return (
       <div>
         <button onClick={() => setDashboardView("main")} style={{ background: "none", border: "none", color: "#888", cursor: "pointer", fontSize: 13, fontWeight: 600, marginBottom: 16 }}>← Back to dashboard</button>
-        <h2 style={{ fontSize: 22, fontWeight: 800, marginBottom: 16 }}>Items Sold</h2>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
+          <h2 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>Items Sold</h2>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn btn-ghost" onClick={() => exportItemsSoldCSV(analyticsFilter)}>⬇ Export ({filterLabel(analyticsFilter)})</button>
+            <button className="btn btn-primary" onClick={() => printItemsSoldReport(analyticsFilter)}>🖨 Print / Save PDF</button>
+          </div>
+        </div>
         {renderAnalyticsFilterBar()}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px,1fr))", gap: 14, marginBottom: 20 }}>
+          <StatCard label="Total Units Sold" value={a.topItems.reduce((s, [, qty]) => s + qty, 0)} color="#16a34a" sub={filterLabel(analyticsFilter)} />
+        </div>
         <div className="card" style={{ padding: 20, borderRadius: 16 }}>
           {a.topItems.length === 0 ? <p style={{ color: "#999" }}>No items sold in this period.</p> : a.topItems.map(([name, qty]) => {
             const priorQty = priorCounts[name] || 0;
@@ -2304,14 +2533,12 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                 ))}
                 {orderFilter === "served" && currentData.map((o) => (
                   <OrderCard key={o.id} order={o}>
-                    <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(o, false)} style={{ flex: 1 }}>Generate Bill</button>
-                    {billing.upiId && billing.upiSelfPayEnabled && <button className="btn btn-sm btn-ghost" onClick={() => openGenerateBill(o, true)} style={{ flex: 1 }}>Bill + QR</button>}
+                    <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(o)} style={{ flex: 1 }}>Generate Bill</button>
                   </OrderCard>
                 ))}
                 {orderFilter === "billRequested" && currentData.map((o) => (
                   <OrderCard key={o.id} order={o}>
-                    <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(o, false)} style={{ flex: 1 }}>Generate Bill</button>
-                    {billing.upiId && billing.upiSelfPayEnabled && <button className="btn btn-sm btn-ghost" onClick={() => openGenerateBill(o, true)} style={{ flex: 1 }}>Bill + QR</button>}
+                    <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(o)} style={{ flex: 1 }}>Generate Bill</button>
                   </OrderCard>
                 ))}
                 {orderFilter === "billed" && currentData.map((o) => (
@@ -2365,7 +2592,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
                         <button className="btn btn-sm btn-ghost" onClick={() => printBill(o)} style={{ flex: 1 }}>Print</button>
                         {features.splitBill && <button className="btn btn-sm btn-ghost" onClick={() => openSplitBill(o)} style={{ flex: 1 }}>Split Bill</button>}
-                        <button className="btn btn-sm btn-success" onClick={() => openMarkPaid(o)} style={{ flex: 1 }}>Mark Paid</button>
+                        <button className="btn btn-sm btn-success" onClick={() => handleMarkPaidClick(o)} style={{ flex: 1 }}>Mark Paid</button>
                       </div>
                     )}
                   </div>
@@ -2403,21 +2630,34 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
               ))}
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10, maxHeight: 440, overflowY: "auto" }}>
-              {posItems.map((item) => (
-                <div key={item.id} className="card" style={{ padding: 10, borderRadius: 12, textAlign: "center", overflow: "hidden" }}>
-                  <div style={{ width: "100%", aspectRatio: "1 / 1", borderRadius: 10, overflow: "hidden", marginBottom: 8, background: "var(--surface-2, #f3efe6)", display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
-                    {item.imageUrl ? <img src={item.imageUrl} alt={item.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 26 }}>🍽️</span>}
-                    {item.bogoEnabled && <span style={{ position: "absolute", top: 4, left: 4, background: "#16a34a", color: "#fff", fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 100 }}>🎁 BOGO</span>}
+              {posItems.map((item) => {
+                const hasOptions = posItemHasOptions(item);
+                const totalQty = posTotalQtyFor(item);
+                return (
+                  <div key={item.id} className="card" style={{ padding: 10, borderRadius: 12, textAlign: "center", overflow: "hidden" }}>
+                    <div style={{ width: "100%", aspectRatio: "1 / 1", borderRadius: 10, overflow: "hidden", marginBottom: 8, background: "var(--surface-2, #f3efe6)", display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
+                      {item.imageUrl ? <img src={item.imageUrl} alt={item.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 26 }}>🍽️</span>}
+                      {item.bogoEnabled && <span style={{ position: "absolute", top: 4, left: 4, background: "#16a34a", color: "#fff", fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 100 }}>🎁 BOGO</span>}
+                      {totalQty > 0 && <span style={{ position: "absolute", top: 4, right: 4, background: "#1a1a2e", color: "#fff", fontSize: 10.5, fontWeight: 800, minWidth: 18, height: 18, padding: "0 4px", borderRadius: 100, display: "flex", alignItems: "center", justifyContent: "center" }}>{totalQty}</span>}
+                    </div>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.name}</div>
+                    <div style={{ fontSize: 12, color: "#e8a33d", fontWeight: 800, marginBottom: 8 }}>
+                      {item.variations?.length > 0 ? `From ₹${Math.min(...item.variations.map((v) => v.price))}` : `₹${item.price}`}
+                    </div>
+                    {hasOptions ? (
+                      <button onClick={() => posTapItem(item)} className="btn btn-sm btn-primary" style={{ width: "100%" }}>
+                        {totalQty > 0 ? "+ Add More" : "Select Options"}
+                      </button>
+                    ) : (
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+                        <button onClick={() => posAdjustLineQty(posLineKey(item.id, null, []), -1)} className="btn btn-sm btn-ghost" style={{ width: 28, padding: 0 }}>-</button>
+                        <span style={{ fontWeight: 700, minWidth: 16 }}>{posSimpleQtyFor(item)}</span>
+                        <button onClick={() => posTapItem(item)} className="btn btn-sm btn-primary" style={{ width: 28, padding: 0 }}>+</button>
+                      </div>
+                    )}
                   </div>
-                  <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.name}</div>
-                  <div style={{ fontSize: 12, color: "#e8a33d", fontWeight: 800, marginBottom: 8 }}>₹{item.price}</div>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-                    <button onClick={() => posRemoveItem(item)} className="btn btn-sm btn-ghost" style={{ width: 28, padding: 0 }}>-</button>
-                    <span style={{ fontWeight: 700, minWidth: 16 }}>{posCart[item.id] || 0}</span>
-                    <button onClick={() => posAddItem(item)} className="btn btn-sm btn-primary" style={{ width: 28, padding: 0 }}>+</button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
               {posItems.length === 0 && <p style={{ color: "#999", gridColumn: "1/-1", textAlign: "center" }}>No items match.</p>}
             </div>
           </div>
@@ -2431,10 +2671,16 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
             {posLines.length === 0 ? (
               <p style={{ color: "#999", fontSize: 13 }}>Cart is empty.</p>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
                 {posLines.map((l) => (
-                  <div key={l.itemId} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-                    <span>{l.name} ×{l.qty}</span><span>₹{l.price * l.qty}</span>
+                  <div key={l.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, gap: 8 }}>
+                    <span style={{ flex: 1, minWidth: 0 }}>{l.name}</span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                      <button onClick={() => posAdjustLineQty(l.key, -1)} className="btn btn-sm btn-ghost" style={{ width: 22, height: 22, padding: 0, fontSize: 11 }}>-</button>
+                      <span style={{ fontWeight: 700, minWidth: 14, textAlign: "center" }}>{l.qty}</span>
+                      <button onClick={() => posAdjustLineQty(l.key, 1)} className="btn btn-sm btn-ghost" style={{ width: 22, height: 22, padding: 0, fontSize: 11 }}>+</button>
+                    </div>
+                    <span style={{ fontWeight: 700, minWidth: 48, textAlign: "right" }}>₹{l.price * l.qty}</span>
                   </div>
                 ))}
               </div>
@@ -2842,7 +3088,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                           <th style={{ padding: "6px 8px" }}>Name</th>
                           <th style={{ padding: "6px 8px" }}>Price</th>
                           <th style={{ padding: "6px 8px" }}>Category</th>
-                          <th style={{ padding: "6px 8px" }}>Type</th>
+                          {!siteSettings.pureVeg && <th style={{ padding: "6px 8px" }}>Type</th>}
                           <th style={{ padding: "6px 8px" }}>Flags</th>
                           {importPreview.isZip && <th style={{ padding: "6px 8px" }}>Photo</th>}
                         </tr>
@@ -2853,9 +3099,11 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                             <td style={{ padding: "6px 8px" }}>{item.name}</td>
                             <td style={{ padding: "6px 8px" }}>₹{item.price}</td>
                             <td style={{ padding: "6px 8px" }}>{item.category}</td>
-                            <td style={{ padding: "6px 8px" }}>
-                              <span style={{ color: item.foodType === "nonveg" ? "#dc2626" : "#16a34a", fontWeight: 600 }}>{item.foodType}</span>
-                            </td>
+                            {!siteSettings.pureVeg && (
+                              <td style={{ padding: "6px 8px" }}>
+                                <span style={{ color: item.foodType === "nonveg" ? "#dc2626" : "#16a34a", fontWeight: 600 }}>{item.foodType}</span>
+                              </td>
+                            )}
                             <td style={{ padding: "6px 8px" }}>
                               {item.chefSpecial && <span style={{ fontSize: 10, background: "#1a1a2e", color: "#fff", padding: "2px 6px", borderRadius: 4, marginRight: 4 }}>CS</span>}
                               {item.featured && <span style={{ fontSize: 10, background: "#e8a33d", color: "#fff", padding: "2px 6px", borderRadius: 4 }}>★</span>}
@@ -2962,7 +3210,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
           </p>
 
           <label style={labelStyle}>Food Type *</label>
-          <FoodTypeToggle value={newItem.foodType} onChange={(v) => setNewItem((p) => ({ ...p, foodType: v }))} />
+          <FoodTypeToggle value={newItem.foodType} onChange={(v) => setNewItem((p) => ({ ...p, foodType: v }))} pureVeg={siteSettings.pureVeg} />
 
           <VariationsAddonsEditor form={newItem} setForm={setNewItem} />
 
@@ -3101,6 +3349,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
               toggleChefSpecial={toggleChefSpecial}
               startEdit={startEdit}
               deleteItem={deleteItem}
+              pureVeg={siteSettings.pureVeg}
             />
           ))}
         </div>
@@ -3280,6 +3529,13 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
           <input type="checkbox" checked={!!siteSettingsForm.hasBar} onChange={(e) => setSiteSettingsForm((p) => ({ ...p, hasBar: e.target.checked }))} />
           🍸 This restaurant runs a Bar section
         </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13.5, fontWeight: 600, cursor: "pointer", marginBottom: 6, padding: "12px 14px", borderRadius: 12, background: siteSettingsForm.pureVeg ? "#16a34a12" : "var(--surface-2, #f3efe6)", border: siteSettingsForm.pureVeg ? "1px solid #16a34a55" : "1px solid transparent" }}>
+          <input type="checkbox" checked={!!siteSettingsForm.pureVeg} onChange={(e) => setSiteSettingsForm((p) => ({ ...p, pureVeg: e.target.checked }))} />
+          🌱 Pure Veg Restaurant
+        </label>
+        <p style={{ fontSize: 11.5, color: "#999", marginTop: -2, marginBottom: 18 }}>
+          When on, "Non-veg" is removed everywhere — the veg/non-veg picker, indicator dots, import columns, and every other mention disappear across Menu, POS and imports. New items are always saved as veg.
+        </p>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
           <div>
             <label style={labelStyle}>Most Loved at ★</label>
@@ -3440,38 +3696,118 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     </div>
   );
 
-  // === NEW: optional customer-details modal shown before generating a bill ===
-  const billCustomerModal = billCustomerOrder && (
-    <div style={modalOverlayStyle} onClick={() => setBillCustomerOrder(null)}>
+  // === NEW: unified "Generate Bill" flow — collects optional customer info
+  // AND the payment method up front (instead of asking payment method later
+  // at Mark Paid time). Choosing UPI shows the QR + "Open in UPI App" button
+  // right there on the bill; any other method just shows the plain bill.
+  const billFlowModal = billFlowOrder && (
+    <div style={modalOverlayStyle} onClick={() => setBillFlowOrder(null)}>
       <div style={modalBoxStyle} onClick={(e) => e.stopPropagation()}>
-        <h3 style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>Customer Details</h3>
-        <p style={{ fontSize: 12.5, color: "#888", marginBottom: 16 }}>Optional — add a name/phone to track repeat visits in the CRM tab.</p>
-        <label style={labelStyle}>Name</label>
-        <input placeholder="e.g. Rahul Sharma" value={billCustomerForm.name} onChange={(e) => setBillCustomerForm((p) => ({ ...p, name: e.target.value }))} style={inputStyle} />
-        <label style={labelStyle}>Phone</label>
-        <input placeholder="e.g. 98765 43210" value={billCustomerForm.phone} onChange={(e) => setBillCustomerForm((p) => ({ ...p, phone: e.target.value }))} style={inputStyle} />
-        <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-          <button className="btn btn-ghost" onClick={() => { generateBill(billCustomerOrder.order, billCustomerOrder.withQr, null); setBillCustomerOrder(null); }} style={{ flex: 1 }}>Skip & Generate</button>
-          <button className="btn btn-primary" onClick={() => { generateBill(billCustomerOrder.order, billCustomerOrder.withQr, billCustomerForm); setBillCustomerOrder(null); }} style={{ flex: 1 }}>Save & Generate</button>
+        <h3 style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>Generate Bill — Table {billFlowOrder.table}</h3>
+        <p style={{ fontSize: 12.5, color: "#888", marginBottom: 16 }}>Customer details are optional. Payment method decides whether a UPI QR is shown on the bill.</p>
+
+        <label style={labelStyle}>Customer Name (optional)</label>
+        <input placeholder="e.g. Rahul Sharma" value={billFlowForm.name} onChange={(e) => setBillFlowForm((p) => ({ ...p, name: e.target.value }))} style={inputStyle} />
+        <label style={labelStyle}>Phone (optional)</label>
+        <input placeholder="e.g. 98765 43210" value={billFlowForm.phone} onChange={(e) => setBillFlowForm((p) => ({ ...p, phone: e.target.value }))} style={inputStyle} />
+
+        <label style={labelStyle}>Payment Method</label>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8, marginBottom: 6 }}>
+          {PAYMENT_METHODS.map((m) => {
+            const selected = billFlowForm.paymentMethod === m.key;
+            return (
+              <button key={m.key} type="button" onClick={() => setBillFlowForm((p) => ({ ...p, paymentMethod: m.key }))}
+                style={{ padding: "10px 8px", borderRadius: 10, border: selected ? "2px solid #e8a33d" : "1px solid #ddd", background: selected ? "#e8a33d15" : "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13 }}>
+                {m.icon} {m.label}
+              </button>
+            );
+          })}
+        </div>
+        {billFlowForm.paymentMethod === "upi" && !(billing.upiId && billing.upiSelfPayEnabled) && (
+          <p style={{ fontSize: 11.5, color: "#e8a33d", background: "#fffbeb", padding: 10, borderRadius: 8, marginBottom: 4 }}>
+            ⚠️ UPI self-pay QR isn't set up yet (Settings → Billing). The bill will still be generated and marked as UPI, just without a scannable QR.
+          </p>
+        )}
+
+        <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+          <button className="btn btn-ghost" onClick={() => setBillFlowOrder(null)} style={{ flex: 1 }}>Cancel</button>
+          <button className="btn btn-primary" onClick={() => { generateBill(billFlowOrder, billFlowForm.paymentMethod === "upi", billFlowForm); setBillFlowOrder(null); }} style={{ flex: 2 }}>Generate Bill</button>
         </div>
       </div>
     </div>
   );
 
-  // === NEW: payment-method picker shown before finalizing Mark Paid ===
-  const paymentMethodModal = paymentMethodOrder && (
-    <div style={modalOverlayStyle} onClick={() => setPaymentMethodOrder(null)}>
-      <div style={modalBoxStyle} onClick={(e) => e.stopPropagation()}>
-        <h3 style={{ fontSize: 18, fontWeight: 800, marginBottom: 14 }}>How did the customer pay?</h3>
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
-          {PAYMENT_METHODS.map((m) => (
-            <button key={m.key} className="btn btn-ghost" onClick={() => confirmMarkPaid(m.key)} style={{ justifyContent: "flex-start" }}>{m.icon} {m.label}</button>
-          ))}
+  // === NEW: POS size / add-on picker — mirrors the customer table-side flow.
+  // Opens whenever a tapped item has variations and/or add-ons configured.
+  const posVariantModalUi = posVariantModal && (() => {
+    const { item } = posVariantModal;
+    const variations = item.variations || [];
+    const addons = item.addons || [];
+    const variation = variations.find((v) => v.id === posVariantModal.variationId);
+    const basePrice = variation ? variation.price : item.price;
+    const addonsTotal = addons.filter((a) => posVariantModal.addonIds.includes(a.id)).reduce((s, a) => s + a.price, 0);
+    const linePrice = (basePrice + addonsTotal) * posVariantModal.qty;
+    const canAdd = variations.length === 0 || !!posVariantModal.variationId;
+    return (
+      <div style={modalOverlayStyle} onClick={() => setPosVariantModal(null)}>
+        <div style={{ ...modalBoxStyle, maxWidth: 400 }} onClick={(e) => e.stopPropagation()}>
+          <h3 style={{ fontSize: 18, fontWeight: 800, marginBottom: 4 }}>{item.name}</h3>
+          <p style={{ fontSize: 12.5, color: "#888", marginBottom: 14 }}>Choose options for this item.</p>
+
+          {variations.length > 0 && (
+            <>
+              <label style={labelStyle}>Choose Size *</label>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
+                {variations.map((v) => {
+                  const selected = posVariantModal.variationId === v.id;
+                  return (
+                    <label key={v.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderRadius: 10, border: selected ? "2px solid #e8a33d" : "1px solid #ddd", background: selected ? "#e8a33d10" : "#fff", cursor: "pointer" }}>
+                      <span style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 600, fontSize: 13.5 }}>
+                        <input type="radio" name="posVariant" checked={selected} onChange={() => setPosVariantModal((p) => ({ ...p, variationId: v.id }))} /> {v.name}
+                      </span>
+                      <span style={{ fontWeight: 700, color: "#e8a33d" }}>₹{v.price}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {addons.length > 0 && (
+            <>
+              <label style={labelStyle}>Add-ons (optional)</label>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
+                {addons.map((a) => {
+                  const selected = posVariantModal.addonIds.includes(a.id);
+                  return (
+                    <label key={a.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderRadius: 10, border: selected ? "2px solid #0369a1" : "1px solid #ddd", background: selected ? "#0369a110" : "#fff", cursor: "pointer" }}>
+                      <span style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 600, fontSize: 13.5 }}>
+                        <input type="checkbox" checked={selected} onChange={() => setPosVariantModal((p) => ({ ...p, addonIds: selected ? p.addonIds.filter((id) => id !== a.id) : [...p.addonIds, a.id] }))} /> {a.name}
+                      </span>
+                      <span style={{ fontWeight: 700, color: "#0369a1" }}>+₹{a.price}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          <label style={labelStyle}>Quantity</label>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+            <button onClick={() => setPosVariantModal((p) => ({ ...p, qty: Math.max(1, p.qty - 1) }))} className="btn btn-sm btn-ghost" style={{ width: 32 }}>-</button>
+            <span style={{ fontWeight: 800, fontSize: 16, minWidth: 20, textAlign: "center" }}>{posVariantModal.qty}</span>
+            <button onClick={() => setPosVariantModal((p) => ({ ...p, qty: p.qty + 1 }))} className="btn btn-sm btn-ghost" style={{ width: 32 }}>+</button>
+            <span style={{ marginLeft: "auto", fontWeight: 800, fontSize: 15 }}>₹{linePrice}</span>
+          </div>
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn btn-ghost" onClick={() => setPosVariantModal(null)} style={{ flex: 1 }}>Cancel</button>
+            <button className="btn btn-primary" disabled={!canAdd} onClick={() => { posAddLine(item, posVariantModal.variationId, posVariantModal.addonIds, posVariantModal.qty); setPosVariantModal(null); }} style={{ flex: 2, opacity: canAdd ? 1 : 0.5 }}>Add to Cart</button>
+          </div>
         </div>
-        <button onClick={() => setPaymentMethodOrder(null)} style={{ width: "100%", background: "none", border: "none", color: "#888", cursor: "pointer", padding: 8, fontSize: 13 }}>Cancel</button>
       </div>
-    </div>
-  );
+    );
+  })();
 
   // === RETURN ===
   return (
@@ -3505,8 +3841,8 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
       {splitBillModal}
       {qrModal}
       {moveOrderModal}
-      {billCustomerModal}
-      {paymentMethodModal}
+      {billFlowModal}
+      {posVariantModalUi}
 
       {isMobile && sidebarOpen && <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 99 }} onClick={() => setSidebarOpen(false)} />}
 
