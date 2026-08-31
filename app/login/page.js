@@ -3,7 +3,7 @@
 import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { auth, db, googleProvider } from "@/lib/firebase";
-import { signInWithPopup } from "firebase/auth";
+import { signInWithPopup, signOut } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
 import { useAuth } from "@/lib/auth-context";
 import { HOTEL_STATUS } from "@/lib/plans";
@@ -20,7 +20,7 @@ function LoginPageInner() {
 
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { user: authUser, role, loading: authLoading, homeRoute } = useAuth();
+  const { user: authUser, role, loading: authLoading, homeRoute, refresh } = useAuth();
 
   useEffect(() => {
     if (searchParams.get("blocked") === "1") setPhase("subscription-blocked");
@@ -115,6 +115,17 @@ function LoginPageInner() {
     setError("");
     try {
       const { brandId, role } = await acceptInvite(invite, firebaseUser);
+
+      // Re-resolve who this person is BEFORE navigating anywhere.
+      //
+      // The auth context resolved at sign-in, when the membership document did
+      // not exist yet, so it still believes this account has no role at all.
+      // Navigating on that stale state sends them to a guarded page, the guard
+      // sees no role and bounces them back to login, and login has no home
+      // route to move them on with — they land back where they started having
+      // apparently done nothing.
+      await refresh();
+
       const ok = await checkSubscriptionAndProceed(brandId, null, role);
       if (!ok) return;
     } catch (err) {
@@ -126,6 +137,34 @@ function LoginPageInner() {
   }
 
   const containerStyle = { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, background: "linear-gradient(135deg, #faf8f5 0%, #f5f3ef 100%)" };
+
+  // Signed in, resolved, and holding no role anywhere.
+  //
+  // Without this the page falls through to the sign-in button, so a guard that
+  // bounced someone here shows them a "sign in" screen they are already signed
+  // in to — which reads as the app silently doing nothing. Name the state and
+  // give them a way out.
+  if (!authLoading && authUser && !role && phase !== "invite" && phase !== "subscription-blocked") {
+    return (
+      <div style={containerStyle}>
+        <div style={{ width: "100%", maxWidth: 420, textAlign: "center" }}>
+          <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#fff7ed", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", fontSize: 28 }}>🔑</div>
+          <h1 style={{ fontSize: 22, fontWeight: 800, color: "#1a1a2e", marginBottom: 10 }}>No access yet</h1>
+          <p style={{ color: "#6b6b7b", fontSize: 14.5, lineHeight: 1.6, marginBottom: 8 }}>
+            You are signed in as <strong>{authUser.email}</strong>, but this account is not a
+            member of any restaurant.
+          </p>
+          <p style={{ color: "#6b6b7b", fontSize: 13.5, lineHeight: 1.6, marginBottom: 24 }}>
+            If you were invited, the invitation must be sent to this exact email address.
+            Ask whoever invited you to check it, or sign in with a different account.
+          </p>
+          <button onClick={() => signOut(auth)} style={{ background: "#1a1a2e", border: "none", color: "#fff", padding: "12px 22px", borderRadius: 12, cursor: "pointer", fontSize: 14, fontWeight: 700 }}>
+            Sign out
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (phase === "subscription-blocked") {
     return (
