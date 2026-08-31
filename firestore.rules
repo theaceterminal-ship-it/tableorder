@@ -201,7 +201,19 @@ service cloud.firestore {
       //           edit brand details, but can never write an active status,
       //           change tier, or move the expiry date.
       //   platform admin — may set anything, once payment is verified.
+      // Three distinct writers:
+      //
+      //   1. Platform admin — anything, once payment is verified.
+      //   2. Owner managing their own brand — renaming it, adding an outlet to
+      //      outletIds. They may NOT touch subscription, tier, or ownerUid, so
+      //      running a brand can never become a way to upgrade its plan.
+      //   3. Owner re-submitting a signup that was rejected or has lapsed, which
+      //      does write subscription but only ever into a pending state.
       allow update: if isPlatformAdmin()
+                    || (isBrandOwner(brandId)
+                        && request.resource.data.subscription == resource.data.subscription
+                        && request.resource.data.tier == resource.data.tier
+                        && request.resource.data.ownerUid == resource.data.ownerUid)
                     || (isBrandOwner(brandId)
                         && pendingStatus(request.resource.data.subscription.status)
                         && resource.data.subscription.status in ['pending_payment', 'pending_approval', 'rejected', 'expired']

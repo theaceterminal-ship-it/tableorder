@@ -2,6 +2,7 @@
 
 
 import { useEffect, useState, useRef } from "react";
+import { useRouter } from "next/navigation";
 import { db } from "@/lib/firebase";
 import { uploadToCloudinary } from "@/lib/cloudinary";
 import JSZip from "jszip"; // npm install jszip
@@ -14,7 +15,8 @@ import {
 } from "firebase/firestore";
 import { computeBundleDiscounts, computeBillTotals } from "@/lib/pricing";
 import { createInvite, revokeInvite, listInvites, INVITABLE_ROLES } from "@/lib/invites";
-import { canInvite, ROLE_LABELS, ROLES } from "@/lib/tenancy";
+import { canInvite, can, ROLE_LABELS, ROLES } from "@/lib/tenancy";
+import { fetchMasterMenu, seedOutletFromMaster } from "@/lib/brand";
 import {
   isToday, filterRangeStart, receptionOrderWindowStart,
   withItemIds, mergeItemLines, revenueOrders, soldQtyByItem,
@@ -316,6 +318,7 @@ export default function ReceptionPageWrapper() {
 
 function ReceptionPage() {
   const { role, logout, restaurantId, features, access, brand, brandId, user, setActiveOutlet } = useAuth();
+  const router = useRouter();
 
   const TABS = [
     { id: "dashboard", label: "Dashboard" },
@@ -470,6 +473,8 @@ function ReceptionPage() {
   const [newStaffOutlets, setNewStaffOutlets] = useState([]); // outlet ids this invite grants
   const [pendingInvites, setPendingInvites] = useState([]);
   const [outlets, setOutlets] = useState([]); // every outlet in the brand this person can reach
+  const [seeding, setSeeding] = useState(false);
+  const [seedResult, setSeedResult] = useState(null);
   const [addingStaff, setAddingStaff] = useState(false);
   const [staffError, setStaffError] = useState("");
 
@@ -1195,6 +1200,30 @@ function ReceptionPage() {
       const itemsToUpdate = menuItems.filter((m) => m.category === cat.name);
       await Promise.all(itemsToUpdate.map((m) => updateDoc(doc(db, "restaurants", restaurantId, "menuItems", m.id), { category: newName })));
       if (menuTab === cat.name) setMenuTab(newName);
+    }
+  }
+
+  // Pull anything from the brand's master menu that this outlet does not
+  // already have. Deliberately a COPY, not a live link: the outlet owns its
+  // menu afterwards and can price, hide, and customise items freely, exactly
+  // as it always could. Matching is on name, so seeding twice is a no-op and an
+  // item the outlet has re-priced is never reset to the brand price.
+  async function seedFromMasterMenu() {
+    if (!brandId) return alert("This account is not linked to a brand yet.");
+    setSeeding(true);
+    setSeedResult(null);
+    try {
+      const master = await fetchMasterMenu(brandId);
+      if (master.length === 0) {
+        setSeedResult({ error: "The master menu is empty. Add items to it from the brand console first." });
+        return;
+      }
+      const result = await seedOutletFromMaster(brandId, restaurantId, master, menuItems);
+      setSeedResult(result);
+    } catch (e) {
+      setSeedResult({ error: e?.code === "permission-denied" ? "You do not have permission to change this outlet's menu." : e.message });
+    } finally {
+      setSeeding(false);
     }
   }
 
@@ -2843,9 +2872,33 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
           <button className="btn btn-ghost" onClick={() => { setShowAddCategory((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowImportModal(false); setShowAddBundleRule(false); }}>{showAddCategory ? "Close" : "+ Add Category"}</button>
           {features.smartSuggestions && <button className="btn btn-ghost" onClick={() => { setShowAddBundleRule((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowManageOffers(false); }}>{showAddBundleRule ? "Close" : "+ Smart Deal"}</button>}
           <button className="btn btn-ghost" onClick={() => { setShowManageOffers((s) => !s); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowImportModal(false); setShowAddBundleRule(false); }}>{showManageOffers ? "Close" : "🎠 Exclusive Deals"}</button>
+          {brandId && (
+            <button className="btn btn-ghost" onClick={seedFromMasterMenu} disabled={seeding} title="Copy items from your brand's master menu that this outlet doesn't have yet">
+              {seeding ? "Seeding…" : "⬇ Seed from Master Menu"}
+            </button>
+          )}
           <button className="btn btn-primary" onClick={() => { setShowImportModal(true); setShowAddItem(false); setShowAddCombo(false); setShowAddCategory(false); setShowAddBundleRule(false); setShowManageOffers(false); }}>↑ Import Menu</button>
         </div>
       </div>
+
+      {seedResult && (
+        <div style={{
+          marginBottom: 16, padding: 14, borderRadius: 12, fontSize: 13.5,
+          background: seedResult.error ? "#fef2f2" : "#f0fdf4",
+          border: `1px solid ${seedResult.error ? "#fecaca" : "#bbf7d0"}`,
+          color: seedResult.error ? "#b91c1c" : "#166534",
+          display: "flex", alignItems: "center", gap: 10,
+        }}>
+          <span style={{ flex: 1 }}>
+            {seedResult.error
+              ? seedResult.error
+              : seedResult.added === 0
+                ? `Nothing to add — all ${seedResult.skipped} master items are already on this menu.`
+                : `Added ${seedResult.added} item${seedResult.added === 1 ? "" : "s"} from the master menu${seedResult.skipped ? `, skipped ${seedResult.skipped} you already had` : ""}. They are yours now — edit prices and availability freely.`}
+          </span>
+          <button onClick={() => setSeedResult(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", fontWeight: 800, fontSize: 16 }}>×</button>
+        </div>
+      )}
 
       {/* NEW: Offer Carousel — reception-curated exclusive deal banners (up to 8),
           shown as the top scrollable carousel on the customer menu. Each banner is
@@ -4017,6 +4070,25 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
         <div style={{ padding: sidebarCollapsed && !isMobile ? "16px 0" : 20, borderTop: "1px solid rgba(255,255,255,0.08)", fontSize: 11.5, color: "rgba(255,255,255,0.4)", textAlign: sidebarCollapsed && !isMobile ? "center" : "left" }}>
           {sidebarCollapsed && !isMobile ? "T.O." : (
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {/* Outlet switcher — only meaningful once this person reaches more
+                  than one. setActiveOutlet refuses ids outside their access. */}
+              {outlets.length > 1 && (
+                <div>
+                  <div style={{ fontSize: 10.5, letterSpacing: 0.6, textTransform: "uppercase", color: "rgba(255,255,255,0.35)", marginBottom: 6 }}>Outlet</div>
+                  <select
+                    value={restaurantId || ""}
+                    onChange={(e) => setActiveOutlet(e.target.value)}
+                    style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.08)", color: "#fff", fontSize: 12.5, fontWeight: 700, fontFamily: "inherit" }}
+                  >
+                    {outlets.map((o) => <option key={o.id} value={o.id} style={{ color: "#1a1a2e" }}>{o.name || o.id.slice(0, 6)}</option>)}
+                  </select>
+                </div>
+              )}
+              {brandId && can(access, "viewAllOutletReports") && (
+                <button onClick={() => router.push("/brand")} style={{ background: "rgba(255,255,255,0.1)", border: "none", color: "#fff", padding: "8px 12px", borderRadius: 8, cursor: "pointer", fontSize: 12, fontWeight: 700, width: "100%" }}>
+                  🏢 Brand console
+                </button>
+              )}
               <span>Powered by Cabadra</span>
               <button onClick={logout} style={{ background: "rgba(220,38,38,0.15)", border: "none", color: "#fca5a5", padding: "8px 12px", borderRadius: 8, cursor: "pointer", fontSize: 12, fontWeight: 700, width: "100%" }}>Logout {role ? `(${role})` : ""}</button>
             </div>
