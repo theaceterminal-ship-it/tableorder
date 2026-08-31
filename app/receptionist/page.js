@@ -13,6 +13,8 @@ import {
   getDoc, serverTimestamp, writeBatch,
 } from "firebase/firestore";
 import { computeBundleDiscounts, computeBillTotals } from "@/lib/pricing";
+import { createInvite, revokeInvite, listInvites, INVITABLE_ROLES } from "@/lib/invites";
+import { canInvite, ROLE_LABELS, ROLES } from "@/lib/tenancy";
 import {
   isToday, filterRangeStart, receptionOrderWindowStart,
   withItemIds, mergeItemLines, revenueOrders, soldQtyByItem,
@@ -313,7 +315,7 @@ export default function ReceptionPageWrapper() {
 }
 
 function ReceptionPage() {
-  const { role, logout, restaurantId, features } = useAuth();
+  const { role, logout, restaurantId, features, access, brand, brandId, user, setActiveOutlet } = useAuth();
 
   const TABS = [
     { id: "dashboard", label: "Dashboard" },
@@ -465,6 +467,9 @@ function ReceptionPage() {
   const [staffList, setStaffList] = useState([]);
   const [newStaffEmail, setNewStaffEmail] = useState("");
   const [newStaffRole, setNewStaffRole] = useState("kitchen");
+  const [newStaffOutlets, setNewStaffOutlets] = useState([]); // outlet ids this invite grants
+  const [pendingInvites, setPendingInvites] = useState([]);
+  const [outlets, setOutlets] = useState([]); // every outlet in the brand this person can reach
   const [addingStaff, setAddingStaff] = useState(false);
   const [staffError, setStaffError] = useState("");
 
@@ -491,6 +496,30 @@ function ReceptionPage() {
     const t = setInterval(() => setTick((x) => x + 1), 1000);
     return () => clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    if (!brandId || !brand) { setOutlets([]); return; }
+    let cancelled = false;
+    (async () => {
+      const ids = (brand.outletIds || []).filter((id) => access.allOutlets || access.outletIds.includes(id));
+      const loaded = await Promise.all(ids.map(async (id) => {
+        try {
+          const snap = await getDoc(doc(db, "restaurants", id));
+          return snap.exists() ? { id, ...snap.data() } : { id, name: id.slice(0, 6) };
+        } catch {
+          return { id, name: id.slice(0, 6) };
+        }
+      }));
+      if (!cancelled) setOutlets(loaded);
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [brandId, brand, access.allOutlets, access.outletIds.join(",")]);
+
+  useEffect(() => {
+    refreshInvites();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [brandId]);
 
   useEffect(() => {
     if (!restaurantId) return;
@@ -1392,26 +1421,64 @@ function ReceptionPage() {
   }
 
   // === staff ===
+  // An invitation now carries the SCOPE of the grant — which brand, which
+  // outlets, and who issued it — so the security rules can verify the inviter
+  // actually held what they gave away. Without that, a manager of one outlet
+  // could quietly add a colleague to another.
+  const invitableRoles = INVITABLE_ROLES.filter((r) =>
+    canInvite(access, r.role, newStaffOutlets.length > 0 ? newStaffOutlets : [restaurantId])
+  );
+
+  async function refreshInvites() {
+    if (!brandId) return;
+    try { setPendingInvites(await listInvites(brandId)); } catch { setPendingInvites([]); }
+  }
+
   async function addStaff() {
-    if (!newStaffEmail.trim()) return setStaffError("Email is required");
-    if (!newStaffEmail.includes("@")) return setStaffError("Enter a valid email");
+    const email = newStaffEmail.trim();
+    if (!email) return setStaffError("Email is required");
+    if (!email.includes("@")) return setStaffError("Enter a valid email");
+    if (!brandId) return setStaffError("This account has not been linked to a brand yet — run /setup/migrate first.");
+
+    // Default the grant to the outlet currently being operated.
+    const outletIds = newStaffOutlets.length > 0 ? newStaffOutlets : [restaurantId];
+    if (!canInvite(access, newStaffRole, outletIds)) {
+      return setStaffError("You cannot grant that role for those outlets.");
+    }
+
     setAddingStaff(true);
     setStaffError("");
     try {
-      const emailKey = newStaffEmail.trim().toLowerCase().replace(/\./g, "_");
-      const existing = await getDoc(doc(db, "staffEmails", emailKey));
-      if (existing.exists()) { setStaffError("This email was already invited"); setAddingStaff(false); return; }
-      await setDoc(doc(db, "staffEmails", emailKey), { restaurantId, role: newStaffRole, email: newStaffEmail.trim().toLowerCase(), invitedAt: serverTimestamp(), active: true });
-      setNewStaffEmail(""); setNewStaffRole("kitchen"); setAddingStaff(false);
-    } catch (err) { setStaffError(err.message); setAddingStaff(false); }
+      await createInvite({ email, role: newStaffRole, brandId, outletIds, invitedByUid: user.uid });
+      setNewStaffEmail("");
+      setNewStaffOutlets([]);
+      await refreshInvites();
+    } catch (err) {
+      setStaffError(err.message);
+    } finally {
+      setAddingStaff(false);
+    }
   }
+
   async function removeStaff(staffId, staffEmail) {
     if (!confirm("Remove this staff member? They won't be able to log in anymore.")) return;
-    if (staffEmail) {
-      const emailKey = staffEmail.toLowerCase().replace(/\./g, "_");
-      await deleteDoc(doc(db, "staffEmails", emailKey));
+    try {
+      if (staffEmail) await revokeInvite(staffEmail);
+      await deleteDoc(doc(db, "restaurants", restaurantId, "staff", staffId));
+      await refreshInvites();
+    } catch (err) {
+      setStaffError(err.message);
     }
-    await deleteDoc(doc(db, "restaurants", restaurantId, "staff", staffId));
+  }
+
+  async function cancelInvite(email) {
+    if (!confirm(`Cancel the invitation to ${email}?`)) return;
+    try {
+      await revokeInvite(email);
+      await refreshInvites();
+    } catch (err) {
+      setStaffError(err.message);
+    }
   }
 
   // === BULK IMPORT FUNCTIONS ===
@@ -3599,7 +3666,10 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
 
         <div className="card" style={{ padding: 24, borderRadius: 18 }}>
           <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>Staff Management</h3>
-          <p style={{ fontSize: 12.5, color: "var(--text-secondary, #6b6b7b)", marginBottom: 16 }}>Invite staff by email. They sign in with Google and are linked to your restaurant automatically.</p>
+          <p style={{ fontSize: 12.5, color: "var(--text-secondary, #6b6b7b)", marginBottom: 16 }}>
+            Invite staff by email. They sign in with Google and get exactly the role and outlets
+            you grant here — they cannot choose their own.
+          </p>
 
           {staffError && <div style={{ background: "#fef2f2", color: "#dc2626", padding: 10, borderRadius: 8, fontSize: 12, fontWeight: 600, marginBottom: 12 }}>{staffError}</div>}
 
@@ -3608,15 +3678,66 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
               <label style={labelStyle}>Email</label>
               <input type="email" placeholder="staff@example.com" value={newStaffEmail} onChange={(e) => setNewStaffEmail(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }} />
             </div>
-            <div style={{ minWidth: 120 }}>
+            <div style={{ minWidth: 150 }}>
               <label style={labelStyle}>Role</label>
               <select value={newStaffRole} onChange={(e) => setNewStaffRole(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }}>
-                <option value="kitchen">Kitchen</option>
-                <option value="reception">Reception</option>
+                {invitableRoles.map((r) => <option key={r.role} value={r.role}>{r.label}</option>)}
               </select>
             </div>
-            <button onClick={addStaff} disabled={addingStaff} className="btn btn-primary" style={{ padding: "11px 20px", opacity: addingStaff ? 0.6 : 1 }}>{addingStaff ? "..." : "Invite"}</button>
+            <button onClick={addStaff} disabled={addingStaff || invitableRoles.length === 0} className="btn btn-primary" style={{ padding: "11px 20px", opacity: addingStaff ? 0.6 : 1 }}>{addingStaff ? "..." : "Invite"}</button>
           </div>
+
+          {/* Outlet scope — only meaningful once the brand has more than one. */}
+          {outlets.length > 1 && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={labelStyle}>Outlets this person can work at</label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {outlets.map((o) => {
+                  const on = newStaffOutlets.includes(o.id) || (newStaffOutlets.length === 0 && o.id === restaurantId);
+                  const reachable = access.allOutlets || access.outletIds.includes(o.id);
+                  return (
+                    <button
+                      key={o.id}
+                      disabled={!reachable}
+                      onClick={() => setNewStaffOutlets((prev) => {
+                        const base = prev.length === 0 ? [restaurantId] : prev;
+                        return base.includes(o.id) ? base.filter((x) => x !== o.id) : [...base, o.id];
+                      })}
+                      style={{
+                        padding: "7px 13px", borderRadius: 999, fontSize: 12.5, fontWeight: 700, cursor: reachable ? "pointer" : "not-allowed",
+                        border: on ? "1.5px solid #1a1a2e" : "1.5px solid var(--border, #e6e1d6)",
+                        background: on ? "#1a1a2e" : "transparent", color: on ? "#fff" : (reachable ? "#1a1a2e" : "#bbb"),
+                      }}
+                    >
+                      {o.name || o.id.slice(0, 6)}
+                    </button>
+                  );
+                })}
+              </div>
+              <p style={{ fontSize: 11.5, color: "#999", marginTop: 8 }}>
+                You can only grant outlets you manage yourself.
+              </p>
+            </div>
+          )}
+
+          {pendingInvites.length > 0 && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={labelStyle}>Invited, not yet signed in</label>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {pendingInvites.map((i) => (
+                  <div key={i.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 10 }}>
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: 13 }}>{i.email}</div>
+                      <div style={{ fontSize: 11, color: "#9a6a34" }}>
+                        {ROLE_LABELS[i.role] || i.role} · {(i.outletIds || []).length} outlet{(i.outletIds || []).length === 1 ? "" : "s"}
+                      </div>
+                    </div>
+                    <button onClick={() => cancelInvite(i.email)} style={{ background: "none", border: "none", color: "#dc2626", cursor: "pointer", fontSize: 12, fontWeight: 700, padding: 4 }}>Cancel</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {staffList.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>

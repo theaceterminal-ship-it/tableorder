@@ -2,22 +2,21 @@
 
 import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { auth, db, googleProvider, uploadToCloudinary } from "@/lib/firebase";
+import { auth, db, googleProvider } from "@/lib/firebase";
 import { signInWithPopup } from "firebase/auth";
-import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
+import { doc, getDoc } from "firebase/firestore";
 import { useAuth } from "@/lib/auth-context";
 import { HOTEL_STATUS } from "@/lib/plans";
+import { fetchInvite, acceptInvite } from "@/lib/invites";
+import { ROLES, ROLE_LABELS } from "@/lib/tenancy";
 
 function LoginPageInner() {
   const [phase, setPhase] = useState("login");
   const [firebaseUser, setFirebaseUser] = useState(null);
-  const [invitedRestaurantId, setInvitedRestaurantId] = useState(null);
+  const [invite, setInvite] = useState(null); // the invitation addressed to this email
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const [password, setPassword] = useState("");
-  const [restaurantForm, setRestaurantForm] = useState({ name: "", tagline: "", address: "", logoUrl: "" });
-  const [logoUploading, setLogoUploading] = useState(false);
 
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -34,25 +33,41 @@ function LoginPageInner() {
     }
   }, [authUser, role, authLoading, router, phase]);
 
-  async function checkSubscriptionAndProceed(restaurantId, targetRole) {
-    const hotelDoc = await getDoc(doc(db, "hotels", restaurantId));
-    if (hotelDoc.exists()) {
-      const h = hotelDoc.data();
-      const expired = h.planEndDate && h.planEndDate < Date.now();
+  // Subscription state lives on the brand now. hotels/{id} is still read as a
+  // fallback so an account that has not run /setup/migrate yet still routes
+  // correctly instead of being locked out.
+  async function checkSubscriptionAndProceed(brandId, legacyRestaurantId, targetRole) {
+    let sub = null;
+    try {
+      if (brandId) {
+        const brandSnap = await getDoc(doc(db, "brands", brandId));
+        if (brandSnap.exists()) sub = brandSnap.data().subscription || null;
+      }
+      if (!sub && legacyRestaurantId) {
+        const hotelSnap = await getDoc(doc(db, "hotels", legacyRestaurantId));
+        if (hotelSnap.exists()) sub = hotelSnap.data();
+      }
+    } catch {
+      // Unreadable subscription means unapproved or unmigrated — fall through
+      // to the pending screen rather than guessing.
+    }
 
-      if (h.status === HOTEL_STATUS.PENDING_PAYMENT || h.status === HOTEL_STATUS.PENDING_APPROVAL) {
+    if (sub) {
+      const expired = sub.planEndDate && sub.planEndDate < Date.now();
+      if (sub.status === HOTEL_STATUS.PENDING_PAYMENT || sub.status === HOTEL_STATUS.PENDING_APPROVAL) {
         router.replace("/pending");
         setLoading(false);
         return false;
       }
-      if (h.status === HOTEL_STATUS.SUSPENDED || h.status === HOTEL_STATUS.REJECTED || expired) {
+      if (sub.status === HOTEL_STATUS.SUSPENDED || sub.status === HOTEL_STATUS.REJECTED || expired) {
         setPhase("subscription-blocked");
         setLoading(false);
         return false;
       }
     }
-    if (targetRole === "reception") router.replace("/receptionist");
-    else router.replace("/kitchen");
+
+    if (targetRole === ROLES.KITCHEN) router.replace("/kitchen");
+    else router.replace("/receptionist");
     return true;
   }
 
@@ -67,21 +82,23 @@ function LoginPageInner() {
       const userDoc = await getDoc(doc(db, "users", fUser.uid));
       if (userDoc.exists()) {
         const data = userDoc.data();
-        const ok = await checkSubscriptionAndProceed(data.restaurantId, data.role);
+        const ok = await checkSubscriptionAndProceed(data.brandId, data.restaurantId || fUser.uid, null);
         if (!ok) return;
         return;
       }
 
-      const emailKey = fUser.email.toLowerCase().replace(/\./g, "_");
-      const inviteDoc = await getDoc(doc(db, "staffEmails", emailKey));
-      if (inviteDoc.exists()) {
-        setInvitedRestaurantId(inviteDoc.data().restaurantId);
-        setPhase("choose-role");
+      // No account yet — is there an invitation waiting for this address?
+      const pending = await fetchInvite(fUser.email);
+      if (pending?.active) {
+        setInvite(pending);
+        setPhase("accept-invite");
         setLoading(false);
         return;
       }
 
-      setPhase("create-restaurant");
+      // Neither an account nor an invitation. Signing up is a separate flow
+      // now, because it has to choose an organisation type and a plan.
+      setPhase("no-account");
       setLoading(false);
     } catch (err) {
       setError(err.message);
@@ -89,82 +106,20 @@ function LoginPageInner() {
     }
   }
 
-  async function handleChooseRole(selectedRole) {
-    if (selectedRole === "reception") { setPhase("set-password"); return; }
-    await finishStaffSetup("kitchen");
-  }
-
-  async function handleSetPassword() {
-    if (!password || password.length < 4) { setError("Password must be at least 4 characters"); return; }
-    await finishStaffSetup("reception", password);
-  }
-
-  async function finishStaffSetup(selectedRole, pwd = null) {
+  // The invitee is not asked what role they want. The previous flow let them
+  // pick, which meant an invited dishwasher could elect to be reception. The
+  // role and the outlets come from the invitation, verbatim.
+  async function handleAcceptInvite() {
     setLoading(true);
+    setError("");
     try {
-      await setDoc(doc(db, "users", firebaseUser.uid), {
-        restaurantId: invitedRestaurantId, role: selectedRole, email: firebaseUser.email,
-        name: firebaseUser.displayName || "", password: pwd, addedAt: serverTimestamp(),
-      });
-      await setDoc(doc(db, "restaurants", invitedRestaurantId, "staff", firebaseUser.uid), {
-        email: firebaseUser.email, name: firebaseUser.displayName || "", role: selectedRole,
-        uid: firebaseUser.uid, status: "active", addedAt: serverTimestamp(),
-      }, { merge: true });
-
-      const ok = await checkSubscriptionAndProceed(invitedRestaurantId, selectedRole);
+      const { brandId, role } = await acceptInvite(invite, firebaseUser);
+      const ok = await checkSubscriptionAndProceed(brandId, null, role);
       if (!ok) return;
     } catch (err) {
-      setError(err.message);
-      setLoading(false);
-    }
-  }
-
-  async function handleLogoUpload(file) {
-    if (!file) return;
-    if (!file.type.startsWith("image/")) return alert("Please select an image");
-    if (file.size > 5 * 1024 * 1024) return alert("Image must be under 5MB");
-    setLogoUploading(true);
-    try {
-      const url = await uploadToCloudinary(file);
-      setRestaurantForm((p) => ({ ...p, logoUrl: url }));
-    } catch (err) {
-      alert("Upload failed: " + err.message);
-    } finally {
-      setLogoUploading(false);
-    }
-  }
-
-  async function handleCreateRestaurant() {
-    if (!restaurantForm.name.trim()) { setError("Restaurant name is required"); return; }
-    setLoading(true);
-    try {
-      const restaurantId = firebaseUser.uid;
-
-      await setDoc(doc(db, "restaurants", restaurantId, "info", "profile"), {
-        name: restaurantForm.name.trim(), tagline: restaurantForm.tagline, address: restaurantForm.address,
-        logoUrl: restaurantForm.logoUrl, email: firebaseUser.email, createdAt: serverTimestamp(),
-      });
-      await setDoc(doc(db, "restaurants", restaurantId, "info", "billing"), {
-        taxPercent: 5, servicePercent: 0, upiId: "",
-      });
-      await setDoc(doc(db, "users", firebaseUser.uid), {
-        restaurantId, role: "reception", email: firebaseUser.email, name: firebaseUser.displayName || "",
-        isCreator: true, addedAt: serverTimestamp(),
-      });
-      await setDoc(doc(db, "restaurants", restaurantId, "staff", firebaseUser.uid), {
-        email: firebaseUser.email, name: firebaseUser.displayName || "", role: "reception",
-        uid: firebaseUser.uid, status: "active", addedAt: serverTimestamp(),
-      });
-      await setDoc(doc(db, "hotels", restaurantId), {
-        status: HOTEL_STATUS.PENDING_APPROVAL,
-        plan: "base",
-        ownerEmail: firebaseUser.email,
-        createdAt: Date.now(),
-      });
-
-      router.replace("/pending");
-    } catch (err) {
-      setError(err.message);
+      setError(err?.code === "permission-denied"
+        ? "This invitation could not be verified. Ask whoever invited you to send it again."
+        : err.message);
       setLoading(false);
     }
   }
@@ -178,7 +133,7 @@ function LoginPageInner() {
           <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#fef2f2", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", fontSize: 28 }}>🔒</div>
           <h1 style={{ fontSize: 22, fontWeight: 800, color: "#1a1a2e", marginBottom: 10 }}>Subscription inactive</h1>
           <p style={{ color: "#6b6b7b", fontSize: 14.5, lineHeight: 1.6 }}>
-            This restaurant's Cabadra subscription has expired or been paused.
+            This restaurant&rsquo;s Cabadra subscription has expired or been paused.
             Please contact your administrator to renew access.
           </p>
         </div>
@@ -215,89 +170,53 @@ function LoginPageInner() {
     );
   }
 
-  if (phase === "choose-role") {
+  if (phase === "accept-invite" && invite) {
     return (
       <div style={containerStyle}>
-        <div style={{ width: "100%", maxWidth: 400, textAlign: "center" }}>
+        <div style={{ width: "100%", maxWidth: 420, textAlign: "center" }}>
           <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#e8a33d20", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", fontSize: 28 }}>👋</div>
-          <h1 style={{ fontSize: 24, fontWeight: 800, color: "#1a1a2e", marginBottom: 8 }}>Welcome aboard!</h1>
-          <p style={{ color: "#6b6b7b", marginBottom: 32, fontSize: 15 }}>You've been invited to join the team. Choose your role:</p>
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <button onClick={() => handleChooseRole("kitchen")} className="tap-btn" style={{ padding: 20, borderRadius: 16, border: "2px solid #e6e1d6", background: "#fff", cursor: "pointer", textAlign: "left", display: "flex", alignItems: "center", gap: 16 }}>
-              <div style={{ width: 48, height: 48, borderRadius: 12, background: "#dcfce7", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>👨‍🍳</div>
-              <div><div style={{ fontWeight: 700, fontSize: 16, color: "#1a1a2e" }}>Kitchen Staff</div><div style={{ fontSize: 13, color: "#6b6b7b" }}>Manage orders and cooking times</div></div>
-            </button>
-            <button onClick={() => handleChooseRole("reception")} className="tap-btn" style={{ padding: 20, borderRadius: 16, border: "2px solid #e6e1d6", background: "#fff", cursor: "pointer", textAlign: "left", display: "flex", alignItems: "center", gap: 16 }}>
-              <div style={{ width: 48, height: 48, borderRadius: 12, background: "#dbeafe", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>🖥️</div>
-              <div><div style={{ fontWeight: 700, fontSize: 16, color: "#1a1a2e" }}>Reception / Manager</div><div style={{ fontSize: 13, color: "#6b6b7b" }}>Manage menu, tables, billing & staff</div></div>
-            </button>
+          <h1 style={{ fontSize: 24, fontWeight: 800, color: "#1a1a2e", marginBottom: 8 }}>You&rsquo;ve been invited</h1>
+          <p style={{ color: "#6b6b7b", marginBottom: 24, fontSize: 15 }}>
+            Joining as <strong style={{ color: "#1a1a2e" }}>{ROLE_LABELS[invite.role] || invite.role}</strong>
+            {(invite.outletIds || []).length > 1 ? ` across ${invite.outletIds.length} outlets` : ""}.
+          </p>
+          <div style={{ background: "#fff", border: "1px solid #e6e1d6", borderRadius: 14, padding: 18, textAlign: "left", marginBottom: 22 }}>
+            <div style={{ fontSize: 11.5, fontWeight: 800, color: "#6b6b7b", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>Your access</div>
+            <div style={{ fontSize: 14, color: "#1a1a2e", lineHeight: 1.7 }}>
+              <div>{ROLE_LABELS[invite.role] || invite.role}</div>
+              <div style={{ fontSize: 12.5, color: "#6b6b7b" }}>{firebaseUser?.email}</div>
+            </div>
+            <p style={{ fontSize: 11.5, color: "#999", marginTop: 10, marginBottom: 0 }}>
+              Set by whoever invited you. If this looks wrong, ask them to send a new invitation.
+            </p>
           </div>
+          {error && <div style={{ background: "#fef2f2", color: "#dc2626", padding: 12, borderRadius: 10, fontSize: 13, fontWeight: 600, marginBottom: 16 }}>{error}</div>}
+          <button onClick={handleAcceptInvite} disabled={loading} className="tap-btn"
+            style={{ width: "100%", padding: 14, borderRadius: 12, border: "none", background: "#1a1a2e", color: "#fff", fontSize: 15, fontWeight: 700, cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.6 : 1 }}>
+            {loading ? "Setting up…" : "Accept and continue"}
+          </button>
         </div>
       </div>
     );
   }
 
-  if (phase === "set-password") {
+  if (phase === "no-account") {
     return (
       <div style={containerStyle}>
-        <div style={{ width: "100%", maxWidth: 400, textAlign: "center" }}>
-          <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#dbeafe", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", fontSize: 28 }}>🔐</div>
-          <h1 style={{ fontSize: 24, fontWeight: 800, color: "#1a1a2e", marginBottom: 8 }}>Set a password</h1>
-          <p style={{ color: "#6b6b7b", marginBottom: 32, fontSize: 15 }}>This helps keep your manager account secure</p>
-          {error && <div style={{ background: "#fef2f2", color: "#dc2626", padding: 12, borderRadius: 10, fontSize: 13, fontWeight: 600, marginBottom: 16 }}>{error}</div>}
-          <input type="password" placeholder="Enter password (min 4 chars)" value={password} onChange={(e) => setPassword(e.target.value)}
-            style={{ width: "100%", padding: "14px 16px", borderRadius: 12, border: "1px solid #e6e1d6", fontSize: 15, marginBottom: 16, outline: "none" }} />
-          <button onClick={handleSetPassword} disabled={loading} className="tap-btn"
-            style={{ width: "100%", padding: 14, borderRadius: 12, border: "none", background: "#e8a33d", color: "#fff", fontSize: 15, fontWeight: 700, cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.6 : 1 }}>
-            {loading ? "Setting up..." : "Continue"}
+        <div style={{ width: "100%", maxWidth: 420, textAlign: "center" }}>
+          <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#f3f4f6", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", fontSize: 28 }}>🔍</div>
+          <h1 style={{ fontSize: 24, fontWeight: 800, color: "#1a1a2e", marginBottom: 8 }}>No account found</h1>
+          <p style={{ color: "#6b6b7b", marginBottom: 28, fontSize: 15, lineHeight: 1.6 }}>
+            <strong style={{ color: "#1a1a2e" }}>{firebaseUser?.email}</strong> is not linked to any
+            restaurant, and there is no invitation waiting for it.
+          </p>
+          <button onClick={() => router.push("/signup")} className="tap-btn"
+            style={{ width: "100%", padding: 14, borderRadius: 12, border: "none", background: "#1a1a2e", color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", marginBottom: 12 }}>
+            Set up a new restaurant
           </button>
-          <button onClick={() => { setPhase("choose-role"); setError(""); }} style={{ marginTop: 16, background: "none", border: "none", color: "#6b6b7b", fontSize: 14, cursor: "pointer" }}>← Go back</button>
-        </div>
-      </div>
-    );
-  }
-
-  if (phase === "create-restaurant") {
-    return (
-      <div style={{ ...containerStyle, alignItems: "flex-start", paddingTop: 40 }}>
-        <div style={{ width: "100%", maxWidth: 480 }}>
-          <div style={{ textAlign: "center", marginBottom: 32 }}>
-            <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#e8a33d20", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", fontSize: 28 }}>🏪</div>
-            <h1 style={{ fontSize: 24, fontWeight: 800, color: "#1a1a2e", marginBottom: 8 }}>Create your restaurant</h1>
-            <p style={{ color: "#6b6b7b", fontSize: 15 }}>Let's get your place set up in seconds</p>
-          </div>
-          {error && <div style={{ background: "#fef2f2", color: "#dc2626", padding: 12, borderRadius: 10, fontSize: 13, fontWeight: 600, marginBottom: 16 }}>{error}</div>}
-          <div style={{ background: "#fff", borderRadius: 20, padding: 28, boxShadow: "0 4px 20px rgba(0,0,0,0.06)" }}>
-            <div style={{ marginBottom: 20 }}>
-              <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#6b6b7b", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 }}>Restaurant Name *</label>
-              <input placeholder="e.g. Spice Garden" value={restaurantForm.name} onChange={(e) => setRestaurantForm((p) => ({ ...p, name: e.target.value }))}
-                style={{ width: "100%", padding: "14px 16px", borderRadius: 12, border: "1px solid #e6e1d6", fontSize: 15, outline: "none" }} />
-            </div>
-            <div style={{ marginBottom: 20 }}>
-              <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#6b6b7b", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 }}>Tagline</label>
-              <input placeholder="e.g. Authentic North Indian Cuisine" value={restaurantForm.tagline} onChange={(e) => setRestaurantForm((p) => ({ ...p, tagline: e.target.value }))}
-                style={{ width: "100%", padding: "14px 16px", borderRadius: 12, border: "1px solid #e6e1d6", fontSize: 15, outline: "none" }} />
-            </div>
-            <div style={{ marginBottom: 20 }}>
-              <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#6b6b7b", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 }}>Address</label>
-              <input placeholder="Restaurant address" value={restaurantForm.address} onChange={(e) => setRestaurantForm((p) => ({ ...p, address: e.target.value }))}
-                style={{ width: "100%", padding: "14px 16px", borderRadius: 12, border: "1px solid #e6e1d6", fontSize: 15, outline: "none" }} />
-            </div>
-            <div style={{ marginBottom: 24 }}>
-              <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#6b6b7b", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 }}>Logo</label>
-              <input type="file" accept="image/*" onChange={(e) => handleLogoUpload(e.target.files[0])} style={{ display: "none" }} id="logo-upload" />
-              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                <label htmlFor="logo-upload" style={{ padding: "12px 20px", borderRadius: 12, border: "2px dashed #e6e1d6", background: "#faf8f5", cursor: "pointer", fontSize: 14, color: "#6b6b7b", fontWeight: 600 }}>
-                  {logoUploading ? "Uploading..." : "📷 Upload Logo"}
-                </label>
-                {restaurantForm.logoUrl && !logoUploading && <img src={restaurantForm.logoUrl} alt="Preview" style={{ width: 48, height: 48, borderRadius: 10, objectFit: "cover" }} />}
-              </div>
-            </div>
-            <button onClick={handleCreateRestaurant} disabled={loading} className="tap-btn"
-              style={{ width: "100%", padding: 16, borderRadius: 14, border: "none", background: "#e8a33d", color: "#fff", fontSize: 16, fontWeight: 700, cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.6 : 1 }}>
-              {loading ? "Creating..." : "Create Restaurant →"}
-            </button>
-          </div>
+          <p style={{ fontSize: 13, color: "#888", lineHeight: 1.6 }}>
+            Joining an existing team? Ask them to invite this email address, then sign in again.
+          </p>
         </div>
       </div>
     );

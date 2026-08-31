@@ -113,6 +113,22 @@ service cloud.firestore {
         || (hasBrandMembership(brandId) && brandRole(brandId) in ['brand_manager', 'outlet_manager']);
     }
 
+    // An invitation addressed to the signed-in user's own email address.
+    //
+    // This is what lets someone create their OWN membership: the invite was
+    // written by a person who already held those outlets, so accepting it grants
+    // nothing that was not already granted. Keyed by the plain lowercased email
+    // so there is no key-mangling scheme to keep in sync with the client.
+    function hasInvite() {
+      return signedIn()
+        && request.auth.token.email != null
+        && exists(/databases/$(database)/documents/staffInvites/$(request.auth.token.email.lower()));
+    }
+
+    function myInvite() {
+      return get(/databases/$(database)/documents/staffInvites/$(request.auth.token.email.lower())).data;
+    }
+
     function pendingStatus(status) {
       return status in ['pending_payment', 'pending_approval'];
     }
@@ -200,14 +216,30 @@ service cloud.firestore {
                     || (signedIn() && uid() == memberUid)
                     || canReadBrand(brandId);
 
-        // Bootstrap: the brand creator writes their own owner membership.
-        // Thereafter only an owner may add members, and never another owner —
-        // ownership transfer is a platform-admin operation on purpose.
+        // Three ways a membership comes into being:
+        //
+        //   1. Bootstrap — the brand creator writes their own owner membership
+        //      during signup, before any other document exists.
+        //   2. An owner adds someone directly.
+        //   3. An invited person accepts, creating their OWN membership from an
+        //      invitation addressed to their email. The role and the outlet list
+        //      must match the invite exactly, so accepting cannot grant more
+        //      than was offered.
+        //
+        // Nobody may create another brand_owner: ownership transfer is a
+        // platform-admin operation on purpose.
         allow create: if (isBrandCreator(brandId)
                           && uid() == memberUid
                           && request.resource.data.role == 'brand_owner')
                       || (isBrandOwner(brandId)
-                          && request.resource.data.role in ['brand_manager', 'outlet_manager']);
+                          && request.resource.data.role in ['brand_manager', 'outlet_manager'])
+                      || (uid() == memberUid
+                          && hasInvite()
+                          && myInvite().active == true
+                          && myInvite().brandId == brandId
+                          && myInvite().role == request.resource.data.role
+                          && request.resource.data.role in ['brand_manager', 'outlet_manager']
+                          && request.resource.data.outletIds == myInvite().outletIds);
 
         allow update: if isBrandOwner(brandId)
                       && request.resource.data.role in ['brand_manager', 'outlet_manager'];
@@ -234,10 +266,14 @@ service cloud.firestore {
     // into Andheri.
 
     match /staffInvites/{emailKey} {
-      // Read is open to any signed-in user because login resolves an invite by
-      // the caller's own email before any membership exists. The document
-      // carries no secrets — only a role, a brand, and a list of outlet ids.
-      allow read: if signedIn();
+      // A person may read the invitation addressed to them, and anyone who can
+      // manage the brand may read the ones they issued. Scoping this to the
+      // caller's own email means an invite list is not a harvestable directory
+      // of every restaurant's staff.
+      allow read: if isPlatformAdmin()
+                  || (signedIn() && request.auth.token.email != null
+                      && emailKey == request.auth.token.email.lower())
+                  || (signedIn() && resource != null && isBrandOwner(resource.data.brandId));
 
       allow create, update: if signedIn()
                             && request.resource.data.outletIds.size() > 0
@@ -370,14 +406,22 @@ service cloud.firestore {
         allow update, delete: if canWorkOutlet(outletId);
       }
 
-      // The roster. Bootstrap: an invited user writes their own staff document
-      // at first login, after the invite has been verified by the app. They can
-      // only ever create their OWN entry, and only with a floor-staff role.
+      // The roster.
+      //
+      // A person may create their OWN staff document only when an invitation
+      // addressed to their email grants that role at THIS outlet. The previous
+      // version allowed any signed-in user to roster themselves anywhere, which
+      // meant anyone with an account could add themselves as reception at any
+      // restaurant in the system.
       match /staff/{staffUid} {
         allow read: if canWorkOutlet(outletId);
-        allow create: if (signedIn() && uid() == staffUid
-                          && request.resource.data.role in ['reception', 'kitchen'])
-                      || canManageOutlet(outletId);
+        allow create: if canManageOutlet(outletId)
+                      || (uid() == staffUid
+                          && hasInvite()
+                          && myInvite().active == true
+                          && myInvite().role == request.resource.data.role
+                          && request.resource.data.role in ['reception', 'kitchen']
+                          && outletId in myInvite().outletIds);
         allow update, delete: if canManageOutlet(outletId);
       }
 
