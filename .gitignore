@@ -46,3 +46,4 @@ firebase-debug.log*
 
 # local editor/agent config
 .claude/
+.l.json
