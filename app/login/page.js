@@ -8,7 +8,7 @@ import { doc, getDoc } from "firebase/firestore";
 import { useAuth } from "@/lib/auth-context";
 import { HOTEL_STATUS } from "@/lib/plans";
 import { fetchInvite, acceptInvite } from "@/lib/invites";
-import { ROLES, ROLE_LABELS } from "@/lib/tenancy";
+import { ROLES, ROLE_LABELS, homeRouteFor } from "@/lib/tenancy";
 
 function LoginPageInner() {
   const [phase, setPhase] = useState("login");
@@ -20,18 +20,20 @@ function LoginPageInner() {
 
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { user: authUser, role, loading: authLoading } = useAuth();
+  const { user: authUser, role, loading: authLoading, homeRoute } = useAuth();
 
   useEffect(() => {
     if (searchParams.get("blocked") === "1") setPhase("subscription-blocked");
   }, [searchParams]);
 
+  // Route by the person's ACTUAL role, not the legacy reception/kitchen shim.
+  // An owner or manager belongs in the brand console; only floor staff should
+  // land in a single outlet's POS.
   useEffect(() => {
-    if (!authLoading && authUser && role && phase !== "subscription-blocked") {
-      if (role === "reception") router.replace("/receptionist");
-      else if (role === "kitchen") router.replace("/kitchen");
+    if (!authLoading && authUser && homeRoute && phase !== "subscription-blocked") {
+      router.replace(homeRoute);
     }
-  }, [authUser, role, authLoading, router, phase]);
+  }, [authUser, homeRoute, authLoading, router, phase]);
 
   // Subscription state lives on the brand now. hotels/{id} is still read as a
   // fallback so an account that has not run /setup/migrate yet still routes
@@ -66,8 +68,7 @@ function LoginPageInner() {
       }
     }
 
-    if (targetRole === ROLES.KITCHEN) router.replace("/kitchen");
-    else router.replace("/receptionist");
+    router.replace(homeRouteFor(targetRole) || "/receptionist");
     return true;
   }
 

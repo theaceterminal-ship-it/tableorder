@@ -15,9 +15,13 @@ import { AuthGuard } from "@/lib/auth-guard";
 import {
   fetchOutlets, fetchBrandToday, createOutlet, renameOutlet,
   fetchMasterMenu, addMasterItem, deleteMasterItem,
+  listBrandMembers, listOutletStaff, removeBrandMember, removeOutletStaff,
 } from "@/lib/brand";
-import { can, canAccessOutlet, ROLE_LABELS, TIER_LABELS, tierLimits, canAddOutlet } from "@/lib/tenancy";
-import { listInvites } from "@/lib/invites";
+import {
+  can, canAccessOutlet, canInvite, ROLE_LABELS, TIER_LABELS, ROLES,
+  tierLimits, canAddOutlet,
+} from "@/lib/tenancy";
+import { listInvites, createInvite, revokeInvite, INVITABLE_ROLES } from "@/lib/invites";
 
 const money = (n) => `₹${(n || 0).toLocaleString("en-IN")}`;
 
@@ -38,7 +42,7 @@ function Stat({ k, v, sub }) {
 }
 
 function BrandConsoleInner() {
-  const { access, brand, brandId, outletId, setActiveOutlet, logout, refresh } = useAuth();
+  const { access, brand, brandId, outletId, user, setActiveOutlet, logout, refresh } = useAuth();
   const router = useRouter();
 
   const [tab, setTab] = useState("overview");
@@ -49,7 +53,11 @@ function BrandConsoleInner() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
+  const [members, setMembers] = useState([]);
+  const [staff, setStaff] = useState([]);
   const [newOutlet, setNewOutlet] = useState({ name: "", address: "" });
+  const [inviteForm, setInviteForm] = useState({ email: "", role: "", outletIds: [] });
+  const [inviteError, setInviteError] = useState("");
   const [newItem, setNewItem] = useState({ name: "", price: "", category: "Mains", foodType: "veg", description: "" });
 
   // Only outlets this person actually reaches. An owner reaches all of them;
@@ -77,21 +85,23 @@ function BrandConsoleInner() {
       }
     };
 
-    const [o, t, m, inv] = await Promise.all([
+    const [o, t, m, inv, mem, st] = await Promise.all([
       attempt("outlets", () => fetchOutlets(ids), []),
       attempt("today's figures", () => fetchBrandToday(ids), null),
       can(access, "editMasterMenu")
         ? attempt("master menu", () => fetchMasterMenu(brandId), [])
         : Promise.resolve([]),
-      can(access, "inviteFloorStaff")
-        ? attempt("invitations", () => listInvites(brandId), [])
-        : Promise.resolve([]),
+      attempt("invitations", () => listInvites(brandId), []),
+      attempt("managers", () => listBrandMembers(brandId), []),
+      Promise.all(ids.map((id) => listOutletStaff(id))).then((r) => r.flat()),
     ]);
 
     setOutlets(o);
     setToday(t);
     setMaster(m);
     setInvites(inv);
+    setMembers(mem);
+    setStaff(st);
     setError(failures.length === 0 ? "" :
       `Could not load ${failures.join(", ")}. If these say permission-denied, deploy the latest rules: firebase deploy --only firestore:rules`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
