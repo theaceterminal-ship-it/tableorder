@@ -144,7 +144,17 @@ function LoginPageInner() {
   // bounced someone here shows them a "sign in" screen they are already signed
   // in to — which reads as the app silently doing nothing. Name the state and
   // give them a way out.
-  if (!authLoading && authUser && !role && phase !== "invite" && phase !== "subscription-blocked") {
+  // Only when the page has nothing else of its own to show. Every other phase
+  // renders its own screen -- accepting an invitation, choosing to sign up, a
+  // blocked subscription -- and this must not draw over any of them.
+  //
+  // The previous version tested for a phase named "invite" that does not exist
+  // (it is "accept-invite"), so it painted over the accept screen and told
+  // invitees they had no access while their invitation sat there unaccepted.
+  // `loading` matters as well: between the popup closing and the invite lookup
+  // returning, the user is authenticated but their invitation has not been
+  // found yet. Without this the no-access message flashes up mid sign-in.
+  if (!authLoading && !loading && authUser && !role && phase === "login") {
     return (
       <div style={containerStyle}>
         <div style={{ width: "100%", maxWidth: 420, textAlign: "center" }}>
