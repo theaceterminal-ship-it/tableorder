@@ -133,6 +133,12 @@ function BrandConsoleInner() {
     );
   }
 
+  const isOwner = access.role === ROLES.BRAND_OWNER;
+  // Roles this person may actually grant, over the outlets they hold. An owner
+  // gets managers plus floor staff; a manager gets floor staff only. Filtering
+  // here means the picker can never offer a grant the rules would reject.
+  const grantableRoles = INVITABLE_ROLES.filter((r) => canInvite(access, r.role, visibleOutletIds));
+
   const limits = tierLimits(brand.tier);
   const atCeiling = !canAddOutlet(brand.tier, (brand.outletIds || []).length);
   const sub = brand.subscription || {};
@@ -367,33 +373,148 @@ function BrandConsoleInner() {
 
         {/* ---------------------------------------------------------- team */}
         {tab === "team" && (
-          <div style={card}>
-            <h2 style={{ fontSize: 16, fontWeight: 800, margin: "0 0 4px" }}>Team</h2>
-            <p style={{ fontSize: 12.5, color: "#888", margin: "0 0 16px" }}>
-              Staff are invited from each outlet&rsquo;s POS, where you pick the role and which
-              outlets the person can work at.
-            </p>
-            {invites.length === 0 ? (
-              <p style={{ color: "#888", fontSize: 14 }}>No outstanding invitations.</p>
-            ) : (
-              <>
-                <div style={label}>Invited, not yet signed in</div>
-                {invites.map((i) => (
-                  <div key={i.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 10, marginBottom: 8 }}>
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: 13.5 }}>{i.email}</div>
-                      <div style={{ fontSize: 11.5, color: "#9a6a34" }}>
-                        {ROLE_LABELS[i.role] || i.role} · {(i.outletIds || []).length} outlet{(i.outletIds || []).length === 1 ? "" : "s"}
+          <>
+            <div style={card}>
+              <h2 style={{ fontSize: 16, fontWeight: 800, margin: "0 0 4px" }}>
+                {isOwner ? "Invite a manager or staff member" : "Invite floor staff"}
+              </h2>
+              <p style={{ fontSize: 12.5, color: "#888", margin: "0 0 16px", lineHeight: 1.6 }}>
+                {isOwner
+                  ? "Managers run the outlets you assign them and invite their own reception and kitchen staff. Any outlet without a manager stays yours to run."
+                  : "You can invite reception and kitchen staff for the outlets you manage. Only your brand owner can add managers."}
+              </p>
+
+              {inviteError && (
+                <div style={{ background: "#fef2f2", border: "1px solid #fecaca", color: "#b91c1c", padding: 12, borderRadius: 10, marginBottom: 14, fontSize: 13 }}>{inviteError}</div>
+              )}
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 200px auto", gap: 10, alignItems: "end", marginBottom: 14 }}>
+                <div>
+                  <label style={label}>Email</label>
+                  <input style={input} type="email" placeholder="person@example.com" value={inviteForm.email}
+                    onChange={(e) => setInviteForm((p) => ({ ...p, email: e.target.value }))} />
+                </div>
+                <div>
+                  <label style={label}>Role</label>
+                  <select style={input} value={inviteForm.role}
+                    onChange={(e) => setInviteForm((p) => ({ ...p, role: e.target.value }))}>
+                    {grantableRoles.map((r) => <option key={r.role} value={r.role}>{r.label}</option>)}
+                  </select>
+                </div>
+                <button style={btnPrimary} disabled={busy || grantableRoles.length === 0}
+                  onClick={() => run(async () => {
+                    setInviteError("");
+                    const email = inviteForm.email.trim().toLowerCase();
+                    const chosen = inviteForm.outletIds.length > 0 ? inviteForm.outletIds : visibleOutletIds;
+                    const role = inviteForm.role || grantableRoles[0]?.role;
+                    if (!email) { setInviteError("Email is required"); return; }
+                    if (invites.some((i) => i.email === email)) { setInviteError("That email already has an invitation."); return; }
+                    if (!canInvite(access, role, chosen)) { setInviteError("You cannot grant that role for those outlets."); return; }
+                    await createInvite({ email, role, brandId, outletIds: chosen, invitedByUid: user.uid });
+                    setInviteForm({ email: "", role: "", outletIds: [] });
+                  })}>
+                  {busy ? "Sending..." : "Send invite"}
+                </button>
+              </div>
+
+              <label style={label}>Outlets this person can work at</label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {outlets.map((o) => {
+                  const on = inviteForm.outletIds.length === 0 || inviteForm.outletIds.includes(o.id);
+                  return (
+                    <button key={o.id}
+                      onClick={() => setInviteForm((p) => {
+                        const base = p.outletIds.length === 0 ? visibleOutletIds : p.outletIds;
+                        const next = base.includes(o.id) ? base.filter((x) => x !== o.id) : [...base, o.id];
+                        return { ...p, outletIds: next };
+                      })}
+                      style={{
+                        padding: "7px 13px", borderRadius: 999, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                        border: on ? "1.5px solid #1a1a2e" : "1.5px solid #e6e1d6",
+                        background: on ? "#1a1a2e" : "transparent", color: on ? "#fff" : "#1a1a2e", fontFamily: "inherit",
+                      }}>
+                      {o.name}
+                    </button>
+                  );
+                })}
+              </div>
+              <p style={{ fontSize: 11.5, color: "#999", marginTop: 8, marginBottom: 0 }}>
+                All selected by default. You can only grant outlets you manage yourself.
+              </p>
+            </div>
+
+            {isOwner && (
+              <div style={card}>
+                <h3 style={{ fontSize: 14.5, fontWeight: 800, margin: "0 0 12px" }}>Managers &amp; owners</h3>
+                {members.length === 0 ? (
+                  <p style={{ color: "#888", fontSize: 14 }}>Nobody yet.</p>
+                ) : members.map((m) => {
+                  const names = (m.outletIds || []).map((id) => outlets.find((o) => o.id === id)?.name || id.slice(0, 6));
+                  const isSelf = m.uid === user.uid;
+                  return (
+                    <div key={m.uid} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 0", borderTop: "1px solid #f0ebe3" }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, fontSize: 13.5 }}>
+                          {m.name || m.email || m.uid.slice(0, 8)}
+                          {isSelf && <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 800, color: "#166534", background: "#dcfce7", padding: "2px 7px", borderRadius: 5 }}>YOU</span>}
+                        </div>
+                        <div style={{ fontSize: 11.5, color: "#888" }}>
+                          {ROLE_LABELS[m.role] || m.role}
+                          {m.role === ROLES.BRAND_OWNER ? " · all outlets" : names.length ? ` · ${names.join(", ")}` : " · no outlets assigned"}
+                        </div>
                       </div>
+                      {m.role !== ROLES.BRAND_OWNER && (
+                        <button style={{ ...btn, padding: "6px 11px", fontSize: 12.5, color: "#dc2626", borderColor: "#fecaca" }}
+                          onClick={() => { if (confirm(`Remove ${m.email || "this manager"}?`)) run(() => removeBrandMember(brandId, m.uid)); }}>
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div style={card}>
+              <h3 style={{ fontSize: 14.5, fontWeight: 800, margin: "0 0 12px" }}>Floor staff</h3>
+              {staff.length === 0 ? (
+                <p style={{ color: "#888", fontSize: 14 }}>No reception or kitchen staff yet.</p>
+              ) : staff.map((st) => (
+                <div key={`${st.outletId}-${st.uid}`} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 0", borderTop: "1px solid #f0ebe3" }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 13.5 }}>{st.name || st.email || st.uid.slice(0, 8)}</div>
+                    <div style={{ fontSize: 11.5, color: "#888" }}>
+                      {ROLE_LABELS[st.role] || st.role} {"·"} {outlets.find((o) => o.id === st.outletId)?.name || st.outletId.slice(0, 6)}
                     </div>
                   </div>
-                ))}
-              </>
-            )}
-            <button style={{ ...btnPrimary, marginTop: 14 }} onClick={() => router.push("/receptionist")}>
-              Manage staff in the POS →
-            </button>
-          </div>
+                  <button style={{ ...btn, padding: "6px 11px", fontSize: 12.5, color: "#dc2626", borderColor: "#fecaca" }}
+                    onClick={() => { if (confirm(`Remove ${st.email || "this person"}?`)) run(() => removeOutletStaff(st.outletId, st.uid)); }}>
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            <div style={card}>
+              <h3 style={{ fontSize: 14.5, fontWeight: 800, margin: "0 0 12px" }}>Invited, not yet signed in</h3>
+              {invites.length === 0 ? (
+                <p style={{ color: "#888", fontSize: 14 }}>No outstanding invitations.</p>
+              ) : invites.map((i) => (
+                <div key={i.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 10, marginBottom: 8 }}>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 13.5 }}>{i.email}</div>
+                    <div style={{ fontSize: 11.5, color: "#9a6a34" }}>
+                      {ROLE_LABELS[i.role] || i.role} {"·"} {(i.outletIds || []).map((id) => outlets.find((o) => o.id === id)?.name || id.slice(0, 6)).join(", ") || "no outlets"}
+                    </div>
+                  </div>
+                  <button style={{ ...btn, padding: "6px 11px", fontSize: 12.5, color: "#dc2626", borderColor: "#fecaca" }}
+                    onClick={() => run(() => revokeInvite(i.email))}>
+                    Cancel
+                  </button>
+                </div>
+              ))}
+            </div>
+          </>
         )}
       </div>
     </div>
