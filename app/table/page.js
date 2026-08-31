@@ -5,6 +5,8 @@ import { Suspense, useEffect, useState, useRef, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 import { db } from "@/lib/firebase";
 import { collection, addDoc, updateDoc, doc, onSnapshot, query, where, orderBy, writeBatch } from "firebase/firestore";
+import { computeOfferPrice, computeBogoDiscount } from "@/lib/pricing";
+import { mergeItemLines, tableSessionWindowStart } from "@/lib/orders";
 
 const POPULAR_LIMIT = 8;
 const DISPLAY_FONT = "'Anton', sans-serif";
@@ -24,41 +26,6 @@ const CATEGORY_ICONS = {
 
 // NEW: catchy background palette for the "Loved by Everyone" spotlight carousel.
 const SPOTLIGHT_COLORS = ["#FFF4E0", "#E7F8EF", "#EAF1FF", "#FDEAF0", "#F3ECFF"];
-
-// NEW: offer-banner day-of-week + discount helpers.
-const DAY_KEYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
-function isOfferActiveToday(banner) {
-  if (!banner.days || banner.days.length === 0) return true; // no days picked = every day
-  return banner.days.includes(DAY_KEYS[new Date().getDay()]);
-}
-// Returns the discounted unit price for the banner's linked item today, or
-// null if there's no discount configured or today isn't one of the chosen days.
-function computeOfferPrice(banner, item) {
-  if (!item || !banner.discountPercent || banner.discountPercent <= 0) return null;
-  if (!isOfferActiveToday(banner)) return null;
-  return Math.max(0, Math.round(item.price * (1 - banner.discountPercent / 100)));
-}
-
-// NEW: Buy 1 Get 1 Free preview — mirrors the reception-side computeBogoDiscount
-// logic exactly (pairs every unit of bogoEnabled items high→low, frees the
-// cheaper of each pair; the pricier item in a pair is always what's charged).
-// This is only a live preview for the diner — the real deduction is computed
-// and applied at billing time on the reception side, from the same items.
-function computeBogoPreview(cart, menuItems) {
-  const units = [];
-  Object.values(cart).forEach((line) => {
-    const mi = menuItems.find((m) => m.id === line.itemId);
-    if (mi?.bogoEnabled) {
-      const unitPrice = line.priceOverride != null ? line.priceOverride : mi.price;
-      for (let i = 0; i < line.qty; i++) units.push(unitPrice);
-    }
-  });
-  if (units.length < 2) return 0;
-  units.sort((a, b) => b - a);
-  let amount = 0;
-  for (let i = 1; i < units.length; i += 2) amount += units[i];
-  return Math.round(amount);
-}
 
 const MEAL_COMPLETION_RULES = {
   "Mains": { needs: ["Breads & Rice", "Bread", "Rice", "Breads"], suggestCategory: "Breads & Rice" },
@@ -795,7 +762,15 @@ function TableContent() {
 
   useEffect(() => {
     if (!tableNo || !restaurantId) return;
-    const q = query(collection(db, "restaurants", restaurantId, "orders"), where("table", "==", tableNo));
+    // Bounded to the current sitting. This used to subscribe to every order the
+    // table had ever had, which meant a diner's browser downloaded the table's
+    // entire order history — and anyone could read another table's by editing
+    // the URL. Pair this with the security rules in firestore.rules.
+    const q = query(
+      collection(db, "restaurants", restaurantId, "orders"),
+      where("table", "==", tableNo),
+      where("createdAt", ">=", tableSessionWindowStart()),
+    );
     const unsub = onSnapshot(q, (snap) => {
       const all = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       setAllOrdersRaw(all);
@@ -1075,7 +1050,21 @@ function TableContent() {
       const addonsNote = line.addonNames?.length ? `Add-ons: ${line.addonNames.join(", ")}` : "";
       const composedNotes = [addonsNote, line.notes].filter(Boolean).join(" · ");
       const unitPrice = line.priceOverride != null ? line.priceOverride : item.price;
-      return { name: composedName, qty: line.qty, price: unitPrice, notes: composedNotes || "", spiceLevel: line.spiceLevel || null };
+      // itemId is what every downstream consumer joins on — analytics, the
+      // most-ordered badges, and the recommendation model. `name` is a composed
+      // display string (dish + variation), so it can never be a reliable key:
+      // renaming a dish would orphan its history and each variation would look
+      // like a separate dish.
+      return {
+        itemId: line.itemId,
+        name: composedName,
+        qty: line.qty,
+        price: unitPrice,
+        notes: composedNotes || "",
+        spiceLevel: line.spiceLevel || null,
+        variationId: line.variationId || null,
+        addonIds: line.addonIds || [],
+      };
     });
     if (items.length === 0) return;
 
@@ -1108,15 +1097,7 @@ function TableContent() {
     const servedOrders = activeOrders.filter((o) => o.status === "served");
     if (servedOrders.length === 0) return;
 
-    const mergedMap = {};
-    servedOrders.forEach((o) => {
-      o.items.forEach((it) => {
-        const key = it.name + "|" + (it.notes || "") + "|" + (it.spiceLevel || "");
-        if (mergedMap[key]) mergedMap[key].qty += it.qty;
-        else mergedMap[key] = { ...it };
-      });
-    });
-    const mergedItems = Object.values(mergedMap);
+    const mergedItems = mergeItemLines(servedOrders.flatMap((o) => o.items));
 
     await addDoc(collection(db, "restaurants", restaurantId, "orders"), {
       table: tableNo, items: mergedItems, status: "bill_requested", etaMinutes: null, preparingAt: null, createdAt: Date.now(),
@@ -1141,18 +1122,25 @@ function TableContent() {
   }
 
   const count = Object.values(cart).reduce((a, l) => a + l.qty, 0);
-  const total = Object.values(cart).reduce((sum, l) => {
+
+  // The cart as priced order lines — the same shape reception bills from, so
+  // the shared pricing engine can be handed this directly.
+  const cartLines = Object.values(cart).flatMap((l) => {
     const item = findItem(l.itemId);
-    if (!item) return sum;
-    const unitPrice = l.priceOverride != null ? l.priceOverride : item.price;
-    return sum + unitPrice * l.qty;
-  }, 0);
-  // NEW: Buy 1 Get 1 Free — pairs every unit of bogoEnabled items high→low and
-  // frees the cheaper of each pair (mirrors reception's computeBogoDiscount
-  // exactly, so this preview always matches what lands on the final bill).
-  // `total` above is the face-value sum of every line; `displayTotal` is what
-  // the diner will actually pay once that pairing is applied.
-  const bogoSavings = computeBogoPreview(cart, menuItems);
+    if (!item) return [];
+    return [{
+      itemId: l.itemId,
+      name: item.name + (l.variationName ? ` — ${l.variationName}` : ""),
+      qty: l.qty,
+      price: l.priceOverride != null ? l.priceOverride : item.price,
+    }];
+  });
+  const total = cartLines.reduce((sum, l) => sum + l.price * l.qty, 0);
+  // NEW: Buy 1 Get 1 Free — computed by the SAME function reception bills
+  // with, so the saving previewed here and the saving deducted on the final
+  // bill cannot drift apart. `total` above is the face-value sum of every line;
+  // `displayTotal` is what the diner will actually pay.
+  const bogoSavings = computeBogoDiscount(cartLines, menuItems)?.amount || 0;
   const displayTotal = Math.max(0, total - bogoSavings);
 
   // Which Smart Deal (if any) to surface in the ThresholdBanner — the next
@@ -1380,7 +1368,7 @@ function TableContent() {
         <div style={{ maxWidth: 480, margin: "0 auto" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
             {profile?.logoUrl && (<img src={profile.logoUrl} alt="logo" style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover" }} />)}
-            <div><div style={{ fontWeight: 700, fontSize: 18 }}>{profile?.name || "Table Order"}</div><div style={{ fontSize: 13, color: "#888" }}>Table {tableNo}</div></div>
+            <div><div style={{ fontWeight: 700, fontSize: 18 }}>{profile?.name || "Cabadra"}</div><div style={{ fontSize: 13, color: "#888" }}>Table {tableNo}</div></div>
           </div>
 
           {o.status === "bill_requested" && (
@@ -1406,7 +1394,7 @@ function TableContent() {
               <div style={{ padding: "24px 24px 16px", borderBottom: "2px dashed #eee" }}>
                 <div style={{ textAlign: "center", marginBottom: 16 }}>
                   <div style={{ fontSize: 13, color: "#888", textTransform: "uppercase", letterSpacing: 1 }}>Receipt</div>
-                  <div style={{ fontSize: 20, fontWeight: 800, marginTop: 4 }}>{profile?.name || "Table Order"}</div>
+                  <div style={{ fontSize: 20, fontWeight: 800, marginTop: 4 }}>{profile?.name || "Cabadra"}</div>
                   <div style={{ fontSize: 12, color: "#888" }}>Table {tableNo}</div>
                 </div>
                 {o.items.map((it, i) => (
@@ -1456,7 +1444,7 @@ function TableContent() {
         <div style={{ maxWidth: 480, margin: "0 auto" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
             {profile?.logoUrl && (<img src={profile.logoUrl} alt="logo" style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover" }} />)}
-            <div><div style={{ fontWeight: 700, fontSize: 18 }}>{profile?.name || "Table Order"}</div><div style={{ fontSize: 13, color: "#888" }}>Table {tableNo}</div></div>
+            <div><div style={{ fontWeight: 700, fontSize: 18 }}>{profile?.name || "Cabadra"}</div><div style={{ fontSize: 13, color: "#888" }}>Table {tableNo}</div></div>
           </div>
 
           <div style={{ background: "#1C1B1A", color: "#fff", borderRadius: 20, padding: 32, textAlign: "center", marginBottom: 24 }}>

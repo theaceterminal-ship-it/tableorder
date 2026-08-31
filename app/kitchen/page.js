@@ -2,11 +2,12 @@
 
 
 import { useEffect, useState, useRef } from "react";
+import { startOfDay } from "@/lib/orders";
 import { db } from "@/lib/firebase";
 import { AuthGuard } from "@/lib/auth-guard";
 import { useAuth } from "@/lib/auth-context";
 import { requestNotificationPermission, showPopupNotification } from "@/lib/notifications";
-import { collection, onSnapshot, query, orderBy, doc, updateDoc } from "firebase/firestore";
+import { collection, onSnapshot, query, orderBy, where, doc, updateDoc } from "firebase/firestore";
 
 const MAX_CONCURRENT_PREPARING = 5;
 
@@ -168,7 +169,13 @@ function printKitchenTicket(order) {
       if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
     };
 
+    // An iframe with no src fires `load` for its initial about:blank AND again
+    // after document.write()/close(). Without this guard every ticket printed
+    // twice.
+    let printStarted = false;
     iframe.onload = () => {
+      if (printStarted) return;
+      printStarted = true;
       setTimeout(() => {
         try {
           iframe.contentWindow.focus();
@@ -187,6 +194,27 @@ function printKitchenTicket(order) {
   } catch (e) {
     console.error("printKitchenTicket failed", e);
   }
+}
+
+// Which orders this device has already printed a ticket for.
+//
+// This has to survive a page reload: the kitchen tablet gets refreshed, put to
+// sleep, and reopened constantly, and without persistence every one of those
+// reprinted the entire waiting queue. Capped so the key cannot grow forever.
+const PRINTED_KEY = (restaurantId) => `cabadra:kot-printed:${restaurantId}`;
+
+function loadPrintedIds(restaurantId) {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(PRINTED_KEY(restaurantId)) || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+function savePrintedIds(restaurantId, ids) {
+  try {
+    localStorage.setItem(PRINTED_KEY(restaurantId), JSON.stringify([...ids].slice(-300)));
+  } catch {}
 }
 
 // Module-scope on purpose — see the note in receptionist/page.js above
@@ -255,21 +283,42 @@ function KitchenPage() {
   const { role, logout, restaurantId } = useAuth();
   const [orders, setOrders] = useState([]);
   const [menuItems, setMenuItems] = useState([]);
+  const [ordersLoaded, setOrdersLoaded] = useState(false); // gates auto-print until real data has landed
+  const [autoStartError, setAutoStartError] = useState(null); // surfaced so a denied write is visible, not silent
   const [etaInputs, setEtaInputs] = useState({});
   const [currentTime, setCurrentTime] = useState(new Date());
   const [isMobile, setIsMobile] = useState(false);
   const [mobileTab, setMobileTab] = useState("confirmed");
   const [banner, setBanner] = useState(null);
 
-  const prevConfirmedIds = useRef(null);
   const autoPromotingRef = useRef(new Set()); // in-flight lock so the auto-promote effect can't double-write the same order
+  const autoPromoteFailedRef = useRef(new Set()); // orders whose auto-start failed permanently — never retried
+  const printedIdsRef = useRef(new Set());   // orders this device has already printed a KOT for
+  const printedSeededRef = useRef(false);    // false until the first snapshot has been absorbed
   const DEFAULT_ETA = 20;
   const ETA_PRESETS = [10, 15, 20, 25, 30];
 
   useEffect(() => {
     if (!restaurantId) return;
-    const q = query(collection(db, "restaurants", restaurantId, "orders"), orderBy("createdAt", "asc"));
-    const unsub = onSnapshot(q, (snap) => setOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
+    // Rehydrate what this device has already printed before any snapshot lands,
+    // so a reload cannot reprint tickets that already came out of the printer.
+    printedIdsRef.current = loadPrintedIds(restaurantId);
+    // Re-seed on the next snapshot. ordersLoaded is intentionally not reset
+    // here: seeding is gated on printedSeededRef, so resetting it as well would
+    // only add a redundant render.
+    printedSeededRef.current = false;
+
+    // Bounded to the current service. The kitchen has no use for last month's
+    // orders, and this listener previously pulled every order ever written.
+    const q = query(
+      collection(db, "restaurants", restaurantId, "orders"),
+      where("createdAt", ">=", startOfDay()),
+      orderBy("createdAt", "asc"),
+    );
+    const unsub = onSnapshot(q, (snap) => {
+      setOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      setOrdersLoaded(true);
+    });
     return () => unsub();
   }, [restaurantId]);
 
@@ -298,26 +347,53 @@ function KitchenPage() {
   const preparing = sortByVip(orders.filter((o) => o.status === "preparing"));
   const ready = sortByVip(orders.filter((o) => o.status === "ready"));
 
+  // Auto-print a Kitchen Order Ticket for each newly confirmed order — exactly
+  // once per order, per device, ever.
+  //
+  // The previous version keyed off a ref that started as null and was seeded on
+  // the first effect run. That run happened while `orders` was still the empty
+  // initial state, so the ref was seeded EMPTY — and the moment real data
+  // arrived, every order already waiting looked brand new and got printed. A
+  // page refresh therefore reprinted the whole queue, which is the "it keeps
+  // printing again and again" behaviour.
+  //
+  // Now: nothing is considered new until the first Firestore snapshot has
+  // landed, whatever is already waiting at that moment is marked as handled
+  // without printing, and the printed set is persisted so a reload is a no-op.
   useEffect(() => {
-    const currentIds = new Set(confirmed.map((o) => o.id));
-    if (prevConfirmedIds.current !== null) {
-      const newOnes = confirmed.filter((o) => !prevConfirmedIds.current.has(o.id));
-      if (newOnes.length > 0) {
-        const latest = newOnes[newOnes.length - 1];
-        const itemCount = latest.items.reduce((s, it) => s + it.qty, 0);
-        playKitchenAlert();
-        setBanner({ table: latest.table, count: itemCount });
-        showPopupNotification("🔔 New Order!", `Table ${latest.table} — ${itemCount} item(s)`, { tag: "kitchen-new-order", renotify: true });
-        setMobileTab("confirmed");
-        setTimeout(() => setBanner(null), 5500);
+    if (!restaurantId || !ordersLoaded) return;
 
-        // Auto-print a Kitchen Order Ticket for every newly confirmed order.
-        newOnes.forEach((o) => printKitchenTicket(o));
-      }
+    if (!printedSeededRef.current) {
+      confirmed.forEach((o) => printedIdsRef.current.add(o.id));
+      savePrintedIds(restaurantId, printedIdsRef.current);
+      printedSeededRef.current = true;
+      return;
     }
-    prevConfirmedIds.current = currentIds;
+
+    const newOnes = confirmed.filter((o) => !printedIdsRef.current.has(o.id));
+    if (newOnes.length === 0) return;
+
+    const latest = newOnes[newOnes.length - 1];
+    const itemCount = latest.items.reduce((s, it) => s + it.qty, 0);
+    playKitchenAlert();
+    setBanner({ table: latest.table, count: itemCount });
+    showPopupNotification("🔔 New Order!", `Table ${latest.table} — ${itemCount} item(s)`, { tag: "kitchen-new-order", renotify: true });
+    setMobileTab("confirmed");
+    setTimeout(() => setBanner(null), 5500);
+
+    newOnes.forEach((o) => {
+      printedIdsRef.current.add(o.id);
+      printKitchenTicket(o);
+    });
+    savePrintedIds(restaurantId, printedIdsRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [confirmed.map((o) => o.id).join(",")]);
+  }, [confirmed.map((o) => o.id).join(","), ordersLoaded, restaurantId]);
+
+  // Deliberate reprint, for a jammed printer or a lost ticket. Bypasses the
+  // printed-once guard because the operator is explicitly asking for it.
+  function reprintTicket(order) {
+    printKitchenTicket(order);
+  }
 
   const menuImageMap = {};
   menuItems.forEach((m) => { if (m.imageUrl) menuImageMap[m.name] = m.imageUrl; });
@@ -359,10 +435,29 @@ function KitchenPage() {
     const next = confirmed[0];
     if (!next) return;
     if (autoPromotingRef.current.has(next.id)) return;
+    // A write that failed for a reason that will not change on its own — a
+    // permissions denial, a deleted order — must never be retried. Without
+    // this the effect span-locked: updateDoc applies optimistically to the
+    // local cache (so preparing.length changes), the server rejects it, the
+    // cache rolls back (preparing.length changes again), and both flips
+    // re-trigger this effect. The result was a permanent loop of denied
+    // writes hammering Firestore.
+    if (autoPromoteFailedRef.current.has(next.id)) return;
     autoPromotingRef.current.add(next.id);
     const mins = next.presetEtaMinutes || DEFAULT_ETA;
     updateDoc(doc(db, "restaurants", restaurantId, "orders", next.id), { status: "preparing", etaMinutes: mins, preparingAt: Date.now() })
-      .catch((e) => console.error("Auto-start failed:", e))
+      .catch((e) => {
+        const permanent = e?.code === "permission-denied" || e?.code === "not-found" || e?.code === "invalid-argument";
+        if (permanent) {
+          autoPromoteFailedRef.current.add(next.id);
+          setAutoStartError(
+            e.code === "permission-denied"
+              ? "This account cannot start orders. Ask your manager to re-invite you to this outlet."
+              : `Could not auto-start an order (${e.code}).`
+          );
+        }
+        console.error("Auto-start failed:", e.code || e.message);
+      })
       .finally(() => autoPromotingRef.current.delete(next.id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preparing.length, confirmed[0]?.id, restaurantId]);
@@ -403,6 +498,9 @@ function KitchenPage() {
             <input type="number" placeholder={String(defaultEta)} defaultValue={defaultEta} onChange={(e) => setEtaInputs((prev) => ({ ...prev, [order.id]: e.target.value }))}
               style={{ width: isMobile ? 64 : 70, padding: isMobile ? "12px 10px" : "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", fontSize: 15, fontWeight: 600, textAlign: "center" }} />
             <span style={{ color: "var(--text-secondary)", fontSize: 14 }}>min (custom)</span>
+            <button className="btn-preset" onClick={() => reprintTicket(order)} title="Print this ticket again">
+              🖨 Reprint
+            </button>
             <button className="btn btn-primary" onClick={() => startCooking(order.id, parseInt(etaInputs[order.id]) || defaultEta)} style={{ marginLeft: isMobile ? 0 : "auto", flex: isMobile ? "1 1 auto" : "none" }}>
               ▶ Start Preparing Now
             </button>

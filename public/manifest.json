@@ -1,6 +1,6 @@
 {
-  "name": "Table Order - Staff",
-  "short_name": "TableOrder",
+  "name": "Cabadra - Staff",
+  "short_name": "Cabadra",
   "description": "Restaurant staff dashboard for reception and kitchen",
   "start_url": "/receptionist",
   "display": "standalone",

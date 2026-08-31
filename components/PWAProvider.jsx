@@ -99,7 +99,7 @@ export function PWAProvider({ children }) {
           }}
         >
           <div style={{ fontSize: "14px", lineHeight: 1.4, flex: 1 }}>
-            <strong style={{ color: "#e8a33d" }}>📲 Install Table Order</strong>
+            <strong style={{ color: "#e8a33d" }}>📲 Install Cabadra</strong>
             <br />
             <span style={{ opacity: 0.8, fontSize: "13px" }}>
               {isIOS

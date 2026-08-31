@@ -2,14 +2,14 @@ import { AuthProvider } from "@/lib/auth-context";
 import { PWAProvider } from "@/components/PWAProvider";
 
 export const metadata = {
-  title: "Table Order",
+  title: "Cabadra",
   description: "QR-based restaurant ordering",
   manifest: "/manifest.json",
   themeColor: "#1a1a2e",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "Table Order Staff",
+    title: "Cabadra Staff",
   },
 };
 

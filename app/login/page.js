@@ -178,7 +178,7 @@ function LoginPageInner() {
           <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#fef2f2", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", fontSize: 28 }}>🔒</div>
           <h1 style={{ fontSize: 22, fontWeight: 800, color: "#1a1a2e", marginBottom: 10 }}>Subscription inactive</h1>
           <p style={{ color: "#6b6b7b", fontSize: 14.5, lineHeight: 1.6 }}>
-            This restaurant's Table Order subscription has expired or been paused.
+            This restaurant's Cabadra subscription has expired or been paused.
             Please contact your administrator to renew access.
           </p>
         </div>
@@ -191,7 +191,7 @@ function LoginPageInner() {
       <div style={containerStyle}>
         <div style={{ width: "100%", maxWidth: 400, textAlign: "center" }}>
           <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#1a1a2e", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", fontSize: 28 }}>🍽️</div>
-          <h1 style={{ fontSize: 28, fontWeight: 800, color: "#1a1a2e", marginBottom: 8 }}>Table Order</h1>
+          <h1 style={{ fontSize: 28, fontWeight: 800, color: "#1a1a2e", marginBottom: 8 }}>Cabadra</h1>
           <p style={{ color: "#6b6b7b", marginBottom: 32, fontSize: 15 }}>Sign in to manage your restaurant</p>
 
           {error && <div style={{ background: "#fef2f2", color: "#dc2626", padding: 12, borderRadius: 10, fontSize: 13, fontWeight: 600, marginBottom: 16 }}>{error}</div>}

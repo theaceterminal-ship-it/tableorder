@@ -9,9 +9,14 @@ import { playNotificationSound, requestNotificationPermission, showPopupNotifica
 import { AuthGuard } from "@/lib/auth-guard";
 import { useAuth } from "@/lib/auth-context";
 import {
-  collection, onSnapshot, query, orderBy, doc, updateDoc, deleteDoc, setDoc, addDoc,
+  collection, onSnapshot, query, orderBy, where, doc, updateDoc, deleteDoc, setDoc, addDoc,
   getDoc, serverTimestamp, writeBatch,
 } from "firebase/firestore";
+import { computeBundleDiscounts, computeBillTotals } from "@/lib/pricing";
+import {
+  isToday, filterRangeStart, receptionOrderWindowStart,
+  withItemIds, mergeItemLines, revenueOrders, soldQtyByItem,
+} from "@/lib/orders";
 
 const DEFAULT_CATEGORIES = ["Starters", "Mains", "Breads & Rice", "Continental", "Beverages", "Desserts"];
 const COMBO_CATEGORY = "Combo Packs";
@@ -46,26 +51,6 @@ const ORDER_SECTIONS = [
   { key: "billed", label: "Awaiting Payment", color: "#8b5cf6", emptyMsg: "Nothing awaiting payment.", emptyIcon: "💳" },
 ];
 
-function isToday(ts) {
-  if (!ts) return false;
-  const d = new Date(ts);
-  const now = new Date();
-  return d.getDate() === now.getDate() && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
-}
-function daysAgo(n) {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-}
-function filterRangeStart(filterKey) {
-  if (filterKey === "today") return daysAgo(0);
-  if (filterKey === "3days") return daysAgo(3);
-  if (filterKey === "week") return daysAgo(7);
-  if (filterKey === "month") return daysAgo(30);
-  return 0;
-}
-
 function getCountdown(o) {
   if (o.status !== "preparing" || !o.etaMinutes || !o.preparingAt) return null;
   const totalSeconds = o.etaMinutes * 60;
@@ -75,84 +60,6 @@ function getCountdown(o) {
   const m = Math.floor(remaining / 60);
   const s = remaining % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
-}
-
-// === Bundle rule evaluation (shared by billing + POS preview) ===
-function cartHasAllItems(items, requiredItemIds) {
-  const names = items.map((it) => it.itemId || it.id).filter(Boolean);
-  return requiredItemIds.every((id) => names.includes(id));
-}
-function cartSubtotalForCategories(items, menuItems, requiredCategories) {
-  return items.reduce((sum, it) => {
-    const mi = menuItems.find((m) => m.id === (it.itemId || it.id));
-    if (mi && requiredCategories.includes(mi.category)) return sum + it.price * it.qty;
-    return sum;
-  }, 0);
-}
-
-// NEW: Buy 1 Get 1 Free — driven purely by item.bogoEnabled, no rule needed to
-// set up. Expands every unit across all BOGO-flagged lines in the cart, sorts
-// high→low, and frees every 2nd unit (the cheaper of each pair). The pricier
-// item in a pair is always what the guest is charged for; an odd unit left
-// over at the end (no pair) is charged in full.
-function computeBogoDiscount(items, menuItems) {
-  const units = [];
-  items.forEach((it) => {
-    const mi = menuItems.find((m) => m.id === (it.itemId || it.id));
-    if (mi?.bogoEnabled) {
-      for (let i = 0; i < it.qty; i++) units.push(it.price);
-    }
-  });
-  if (units.length < 2) return null;
-  units.sort((a, b) => b - a);
-  let amount = 0;
-  for (let i = 1; i < units.length; i += 2) amount += units[i];
-  return amount > 0 ? { name: "🎁 Buy 1 Get 1 Free", amount: Math.round(amount) } : null;
-}
-
-function computeBundleDiscounts(items, menuItems, bundleRules) {
-  const discounts = [];
-
-  // BOGO always evaluates first, ahead of manually-configured Smart Deals —
-  // it's driven by the per-item bogoEnabled flag, not a bundleRules entry.
-  const bogo = computeBogoDiscount(items, menuItems);
-  if (bogo) discounts.push(bogo);
-
-  const nowRules = (bundleRules || []).filter((r) => r.active);
-  for (const rule of nowRules) {
-    if (rule.type === "pairDiscount" && Array.isArray(rule.requiredItems) && rule.requiredItems.length >= 1) {
-      if (cartHasAllItems(items, rule.requiredItems)) {
-        let amt = 0;
-        if (rule.discountType === "flat") amt = Number(rule.discountValue) || 0;
-        else {
-          // percent off the cheaper of the two required items
-          const prices = rule.requiredItems
-            .map((id) => (items.find((it) => (it.itemId || it.id) === id)?.price) || 0)
-            .filter((p) => p > 0);
-          const base = prices.length ? Math.min(...prices) : 0;
-          amt = Math.round(base * ((Number(rule.discountValue) || 0) / 100));
-        }
-        if (amt > 0) discounts.push({ name: rule.name, amount: amt });
-      }
-    } else if (rule.type === "thresholdFreeItem" && rule.threshold) {
-      const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
-      if (subtotal >= Number(rule.threshold)) {
-        const freeItem = menuItems.find((m) => m.id === rule.freeItemId);
-        if (freeItem) discounts.push({ name: `${rule.name} (Free ${freeItem.name})`, amount: freeItem.price });
-      }
-    } else if (rule.type === "categoryBundle" && Array.isArray(rule.requiredCategories) && rule.requiredCategories.length >= 1) {
-      const catsPresent = rule.requiredCategories.every((cat) => items.some((it) => {
-        const mi = menuItems.find((m) => m.id === (it.itemId || it.id));
-        return mi && mi.category === cat;
-      }));
-      if (catsPresent) {
-        const relevantSubtotal = cartSubtotalForCategories(items, menuItems, rule.requiredCategories);
-        const amt = Math.round(relevantSubtotal * ((Number(rule.discountValue) || 0) / 100));
-        if (amt > 0) discounts.push({ name: rule.name, amount: amt });
-      }
-    }
-  }
-  return discounts;
 }
 
 // === shared styles (module scope on purpose) ===
@@ -542,6 +449,9 @@ function ReceptionPage() {
 
   // --- NEW: CRM — customers collection, keyed by phone ---
   const [customers, setCustomers] = useState([]);
+  // Bill-time customer name/phone, kept out of the order docs the diner's
+  // device can read. Keyed by billId.
+  const [billCustomers, setBillCustomers] = useState({});
 
   const editCategoryFileInputRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -584,7 +494,16 @@ function ReceptionPage() {
 
   useEffect(() => {
     if (!restaurantId) return;
-    const q = query(collection(db, "restaurants", restaurantId, "orders"), orderBy("createdAt", "asc"));
+    // Bounded on purpose. This listener used to subscribe to every order ever
+    // written, so a reception device re-read the restaurant's entire history on
+    // every page load and the cost grew linearly forever. The window covers the
+    // longest analytics range the UI offers (Last Month); anything older is
+    // reported from rollups, not from a live listener.
+    const q = query(
+      collection(db, "restaurants", restaurantId, "orders"),
+      where("createdAt", ">=", receptionOrderWindowStart()),
+      orderBy("createdAt", "asc"),
+    );
     const unsub = onSnapshot(q, (snap) => setOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
     return () => unsub();
   }, [restaurantId]);
@@ -641,6 +560,23 @@ function ReceptionPage() {
     return () => unsub();
   }, [restaurantId]);
 
+  // Staff-only customer details for bills in the active window. Security rules
+  // deny this collection to the unauthenticated diner client, which is the
+  // whole point of it being separate from the order doc.
+  useEffect(() => {
+    if (!restaurantId) return;
+    const q = query(
+      collection(db, "restaurants", restaurantId, "billCustomers"),
+      where("createdAt", ">=", receptionOrderWindowStart()),
+    );
+    const unsub = onSnapshot(q, (snap) => {
+      const map = {};
+      snap.docs.forEach((d) => { map[d.id] = d.data(); });
+      setBillCustomers(map);
+    }, () => setBillCustomers({}));
+    return () => unsub();
+  }, [restaurantId]);
+
   // NEW: Most Loved / Most Ordered / Most Rated badges — previously the Settings
   // thresholds weren't connected to anything. This recomputes each item's flags
   // whenever orders, menu items, or the thresholds change, and only writes back
@@ -656,17 +592,12 @@ function ReceptionPage() {
   // mostOrdered works immediately since it's derived from orders you already have.
   useEffect(() => {
     if (!restaurantId || menuItems.length === 0) return;
-    const soldQtyByItem = {};
-    orders.forEach((o) => {
-      if (o.status !== "billed" && o.status !== "paid") return;
-      (o.items || []).forEach((it) => {
-        const key = it.itemId || it.name;
-        soldQtyByItem[key] = (soldQtyByItem[key] || 0) + (it.qty || 0);
-      });
-    });
+    // Counts each bill once (merged tables included) and resolves legacy lines
+    // by name, so a dish's variations count toward the same badge threshold.
+    const qtyById = soldQtyByItem(orders, menuItems);
     const updates = [];
     menuItems.forEach((m) => {
-      const soldQty = soldQtyByItem[m.id] || soldQtyByItem[m.name] || 0;
+      const soldQty = qtyById[m.id] || qtyById[m.name] || 0;
       const rating = m.rating || 0;
       const ratingCount = m.ratingCount || 0;
       const mostOrdered = soldQty >= (siteSettings.thresholdMostOrdered || 100);
@@ -788,11 +719,57 @@ function ReceptionPage() {
   const pendingWaiterCalls = waiterCalls.filter((c) => c.status === "pending");
 
   const ordersToday = orders.filter((o) => isToday(o.createdAt));
-  const revenueOrdersToday = ordersToday.filter((o) => o.status === "billed" || o.status === "paid");
+  // revenueOrders() counts a merged-table bill once, not once per table.
+  const revenueOrdersToday = revenueOrders(ordersToday);
   const todaySales = revenueOrdersToday.reduce((sum, o) => sum + (o.billTotal || 0), 0);
-  const todayItemsSold = ordersToday.reduce((sum, o) => sum + (o.items || []).reduce((s, it) => s + (it.qty || 0), 0), 0);
+  const todayItemsSold = revenueOrdersToday.reduce((sum, o) => sum + (o.items || []).reduce((s, it) => s + (it.qty || 0), 0), 0);
   const todayOrderCount = ordersToday.length;
   const avgOrderValue = revenueOrdersToday.length > 0 ? Math.round(todaySales / revenueOrdersToday.length) : 0;
+
+  // === merged tables ===
+  //
+  // Merging was previously only reflected in the "Awaiting Payment" list, so a
+  // party sitting across tables 1 and 2 appeared in New / In Kitchen / Served
+  // as two unrelated orders with no hint they belonged together. Staff had no
+  // way to see the party was one party until the bill was generated.
+  //
+  // These helpers make the grouping visible everywhere.
+
+  // Every table number in the same merged group as `tableNumber`, sorted.
+  // A table that isn't merged returns just itself.
+  function tableGroupNumbers(tableNumber) {
+    const t = tables.find((tb) => tb.number === tableNumber);
+    if (!t || !t.isMerged || !t.mergedGroupId) return [tableNumber];
+    const group = tables
+      .filter((tb) => tb.mergedGroupId === t.mergedGroupId)
+      .map((tb) => tb.number)
+      .sort((a, b) => a - b);
+    return group.length > 0 ? group : [tableNumber];
+  }
+
+  function isMergedTable(tableNumber) {
+    return tableGroupNumbers(tableNumber).length > 1;
+  }
+
+  // What to print on an order card. A billed order already carries the
+  // authoritative list of tables its bill covered (mergedTables), so prefer
+  // that; otherwise derive it from the tables' current merge state.
+  function orderTableLabel(o) {
+    if (Array.isArray(o.mergedTables) && o.mergedTables.length > 1) {
+      return [...o.mergedTables].sort((a, b) => a - b).join(" + ");
+    }
+    return tableGroupNumbers(o.table).join(" + ");
+  }
+
+  // Bill-time customer details for an order, joined from the staff-only
+  // collection. Falls back to whatever legacy orders still carry inline.
+  function customerFor(o) {
+    const rec = o?.billId ? billCustomers[o.billId] : null;
+    return {
+      name: rec?.name || o?.customerName || "",
+      phone: rec?.phone || o?.customerPhone || "",
+    };
+  }
 
   const orderDataByKey = { pending, active, served, billRequested, billed };
 
@@ -921,22 +898,11 @@ function ReceptionPage() {
     setTimeout(() => setSiteSettingsSaved(false), 2000);
   }
 
-  // Normalize a plain items array (not an order) to include itemId for bundle-rule
-  // matching. Takes an array so it can be reused when consolidating items across
-  // several merged-table orders into one bill, not just a single order's items.
+  // Resolve every line to a menu item id before the bill is written. Lines
+  // placed from now on already carry one; this backfills the older ones so
+  // bundle rules, analytics, and the sales history all join correctly.
   function normalizedItems(items) {
-    return items.map((it) => ({ ...it, itemId: it.itemId || menuItems.find((m) => m.name === it.name)?.id || null }));
-  }
-
-  // Merge duplicate line items the same way table-side requestBill() does, so
-  // combining several tables' orders doesn't produce separate rows for the same dish.
-  function mergeItemLines(items) {
-    const map = {};
-    items.forEach((it) => {
-      const key = it.name + "|" + (it.notes || "") + "|" + (it.spiceLevel || "");
-      if (map[key]) map[key].qty += it.qty; else map[key] = { ...it };
-    });
-    return Object.values(map);
+    return withItemIds(items, menuItems);
   }
 
   // Given the order the receptionist clicked "Generate Bill" on, work out every
@@ -965,16 +931,16 @@ function ReceptionPage() {
     const ordersToBill = ordersForBilling(o);
     const rawItems = mergeItemLines(ordersToBill.flatMap((ord) => ord.items));
     const items = normalizedItems(rawItems);
-    const subtotal = items.reduce((sum, it) => sum + it.price * it.qty, 0);
-    const bundleDiscounts = computeBundleDiscounts(items, menuItems, bundleRules);
-    const discountTotal = bundleDiscounts.reduce((s, d) => s + d.amount, 0);
-    const discountedSubtotal = Math.max(0, subtotal - discountTotal);
-    const taxAmount = Math.round((discountedSubtotal * (billing.taxPercent || 0)) / 100);
-    const serviceAmount = Math.round((discountedSubtotal * (billing.servicePercent || 0)) / 100);
-    const grandTotal = discountedSubtotal + taxAmount + serviceAmount;
+    const bill = computeBillTotals({
+      items,
+      menuItems,
+      bundleRules,
+      taxPercent: billing.taxPercent,
+      servicePercent: billing.servicePercent,
+    });
     const selfPayOn = !!billing.upiSelfPayEnabled && !!billing.upiId;
     const upiLink = withQr && selfPayOn
-      ? `upi://pay?pa=${encodeURIComponent(billing.upiId)}&pn=${encodeURIComponent(profile.name || "Restaurant")}&am=${grandTotal}&cu=INR`
+      ? `upi://pay?pa=${encodeURIComponent(billing.upiId)}&pn=${encodeURIComponent(profile.name || "Restaurant")}&am=${bill.grandTotal}&cu=INR`
       : null;
 
     const customerName = (customerInfo?.name || "").trim();
@@ -983,27 +949,56 @@ function ReceptionPage() {
     // instead of being asked again later at Mark Paid time.
     const paymentMethod = customerInfo?.paymentMethod || null;
 
+    // One bill, one id, one instant — billId, billedAt, and the customer
+    // record all stamp the same moment rather than three slightly different ones.
+    const billedAt = Date.now();
+    const billId = `${billedAt}-${ordersToBill[0].id}`;
+    const primaryOrderId = ordersToBill[0].id;
+
     const billPayload = {
-      status: "billed", items: rawItems, billSubtotal: subtotal, billDiscounts: bundleDiscounts, billDiscountTotal: discountTotal,
-      billTaxPercent: billing.taxPercent || 0, billTaxAmount: taxAmount,
-      billServicePercent: billing.servicePercent || 0, billServiceAmount: serviceAmount, billTotal: grandTotal,
+      status: "billed",
+      items,
+      billId,
+      billedAt,
+      billSubtotal: bill.subtotal,
+      billDiscounts: bill.discounts,
+      billDiscountTotal: bill.discountTotal,
+      billTaxPercent: bill.taxPercent, billTaxAmount: bill.taxAmount,
+      billServicePercent: bill.servicePercent, billServiceAmount: bill.serviceAmount,
+      billTotal: bill.grandTotal,
       paymentQrUrl: upiLink ? `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(upiLink)}` : null,
       upiPayLink: upiLink || null,
       mergedTables: ordersToBill.length > 1 ? ordersToBill.map((ord) => ord.table) : null,
-      customerName: customerName || null,
-      customerPhone: customerPhone || null,
+      hasCustomerDetails: !!(customerName || customerPhone),
       paymentMethod: paymentMethod,
     };
+
     // Every order in the group gets the SAME consolidated bill written onto it —
     // that way each table's own device (each listens only to its own table number)
     // shows the identical, correct final bill, not just whichever table reception
     // happened to click "Generate Bill" on.
+    //
+    // But exactly ONE of them is flagged primary. Without that flag, every
+    // report that sums billTotal counted a three-table party's revenue three
+    // times over, and its items three times too. All reporting now goes through
+    // revenueOrders(), which keeps only the primary sibling.
     const batch = writeBatch(db);
-    ordersToBill.forEach((ord) => batch.update(doc(db, "restaurants", restaurantId, "orders", ord.id), billPayload));
+    ordersToBill.forEach((ord) => batch.update(doc(db, "restaurants", restaurantId, "orders", ord.id), {
+      ...billPayload,
+      isBillPrimary: ord.id === primaryOrderId,
+    }));
     await batch.commit();
 
+    // Customer name and phone are deliberately NOT written onto the order doc.
+    // The diner's table client reads order docs directly, so anything stored
+    // there is readable by anyone who can guess a table number. They live in a
+    // staff-only collection instead, joined back by billId for reports.
     if (customerName || customerPhone) {
-      await upsertCustomer(customerName, customerPhone, grandTotal);
+      await setDoc(doc(db, "restaurants", restaurantId, "billCustomers", billId), {
+        billId, name: customerName || null, phone: customerPhone || null,
+        billTotal: bill.grandTotal, createdAt: billedAt,
+      });
+      await upsertCustomer(customerName, customerPhone, bill.grandTotal);
     }
   }
 
@@ -1086,7 +1081,8 @@ function ReceptionPage() {
           <span>${d.name}</span><span>-Rs.${d.amount}</span>
         </div>`).join("");
     const qrHtml = o.paymentQrUrl ? `<div style="text-align:center;margin-top:16px;"><img src="${o.paymentQrUrl}" style="width:160px;" /><div style="font-size:11px;color:#888;margin-top:6px;">Scan to pay via UPI</div></div>` : "";
-    const customerHtml = (o.customerName || o.customerPhone) ? `<div class="sub">👤 ${o.customerName || ""} ${o.customerPhone || ""}</div>` : "";
+    const billCustomer = customerFor(o);
+    const customerHtml = (billCustomer.name || billCustomer.phone) ? `<div class="sub">👤 ${billCustomer.name} ${billCustomer.phone}</div>` : "";
     const paymentMethodLabel = o.paymentMethod ? (PAYMENT_METHODS.find((m) => m.key === o.paymentMethod)?.label || o.paymentMethod) : "";
     const paymentHtml = paymentMethodLabel ? `<div class="sub">💳 Paid via ${paymentMethodLabel}</div>` : "";
     const html = `
@@ -1102,7 +1098,7 @@ function ReceptionPage() {
         </style>
       </head><body>
         ${profile?.logoUrl ? `<div style="text-align:center;margin-bottom:10px;"><img src="${profile.logoUrl}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;" /></div>` : ""}
-        <h2>${profile?.name || "Table Order"}</h2>
+        <h2>${profile?.name || "Cabadra"}</h2>
         <div class="sub">${profile?.tagline || ""}</div>
         <div class="sub">Table ${o.table} - ${new Date(o.createdAt).toLocaleString()}</div>
         ${customerHtml}
@@ -1890,7 +1886,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
   // === ANALYTICS SUB-VIEWS ===
   function computeAnalytics(filterKey) {
     const start = filterRangeStart(filterKey);
-    const inRange = orders.filter((o) => o.createdAt >= start && (o.status === "billed" || o.status === "paid"));
+    const inRange = revenueOrders(orders.filter((o) => o.createdAt >= start));
     const totalSales = inRange.reduce((s, o) => s + (o.billTotal || 0), 0);
     const orderCount = inRange.length;
     const avg = orderCount > 0 ? Math.round(totalSales / orderCount) : 0;
@@ -1899,9 +1895,13 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     inRange.forEach((o) => { hourBuckets[new Date(o.createdAt).getHours()]++; });
     const peakHour = hourBuckets.indexOf(Math.max(...hourBuckets));
 
-    const itemCounts = {};
-    inRange.forEach((o) => o.items.forEach((it) => { itemCounts[it.name] = (itemCounts[it.name] || 0) + it.qty; }));
-    const topItems = Object.entries(itemCounts).sort((a, b) => b[1] - a[1]).slice(0, 8);
+    // Counted by resolved item id so a dish's variations roll up into one row
+    // instead of appearing as several phantom dishes.
+    const qtyById = soldQtyByItem(inRange, menuItems);
+    const topItems = Object.entries(qtyById)
+      .map(([key, qty]) => [menuItems.find((m) => m.id === key)?.name || key, qty])
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8);
 
     return { totalSales, orderCount, avg, hourBuckets, peakHour, topItems, inRange };
   }
@@ -2049,14 +2049,16 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
   // === NEW: Daily Report export (CSV + printable PDF) ===
   function buildTodayReportData() {
     const todays = orders.filter((o) => isToday(o.createdAt));
-    const billedToday = todays.filter((o) => o.status === "billed" || o.status === "paid");
+    const billedToday = revenueOrders(todays);
     const totalSales = billedToday.reduce((s, o) => s + (o.billTotal || 0), 0);
     const totalDiscounts = billedToday.reduce((s, o) => s + (o.billDiscountTotal || (o.billDiscounts || []).reduce((x, d) => x + d.amount, 0)), 0);
     const totalTax = billedToday.reduce((s, o) => s + (o.billTaxAmount || 0), 0);
     const totalService = billedToday.reduce((s, o) => s + (o.billServiceAmount || 0), 0);
-    const itemCounts = {};
-    todays.forEach((o) => (o.items || []).forEach((it) => { itemCounts[it.name] = (itemCounts[it.name] || 0) + it.qty; }));
-    const topItems = Object.entries(itemCounts).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    const qtyById = soldQtyByItem(billedToday, menuItems);
+    const topItems = Object.entries(qtyById)
+      .map(([key, qty]) => [menuItems.find((m) => m.id === key)?.name || key, qty])
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10);
     const hourBuckets = Array(24).fill(0);
     todays.forEach((o) => hourBuckets[new Date(o.createdAt).getHours()]++);
     const peakHour = hourBuckets.indexOf(Math.max(...hourBuckets));
@@ -2085,7 +2087,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
       ...d.todays.map((o) => [
         o.table, new Date(o.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         o.status, (o.items || []).map((it) => `${it.name} x${it.qty}`).join("; "),
-        o.customerName || "", o.customerPhone || "", o.paymentMethod || "",
+        customerFor(o).name, customerFor(o).phone, o.paymentMethod || "",
         o.billSubtotal || "", o.billDiscountTotal || 0, o.billTaxAmount || 0, o.billServiceAmount || 0, o.billTotal || "",
       ]),
     ];
@@ -2104,7 +2106,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     const ordersHtml = d.todays.map((o) => `
       <tr><td>${o.table}</td><td>${new Date(o.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
       <td>${o.status.replace("_", " ")}</td><td>${(o.items || []).map((it) => `${it.name} x${it.qty}`).join(", ")}</td>
-      <td>${o.customerName || o.customerPhone ? `${o.customerName || ""} ${o.customerPhone || ""}` : "-"}</td>
+      <td>${customerFor(o).name || customerFor(o).phone ? `${customerFor(o).name} ${customerFor(o).phone}` : "-"}</td>
       <td style="text-transform:capitalize">${o.paymentMethod || "-"}</td>
       <td style="text-align:right">${o.billTotal ? "₹" + o.billTotal : "-"}</td></tr>`).join("");
     const html = `<html><head><title>Daily Report — ${new Date().toLocaleDateString()}</title>
@@ -2242,7 +2244,16 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
           {list.map((o) => (
             <div key={o.id} className="card" style={{ padding: 16, borderRadius: 14 }}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-                <span style={{ fontWeight: 700 }}>Table {o.table} {o.isVIP && <span style={{ color: "#eab308" }}>★</span>} {o.orderType === "takeaway" && <span style={{ color: "#8b5cf6" }}>📦</span>}</span>
+                <span style={{ fontWeight: 700 }}>
+                  Table {orderTableLabel(o)}
+                  {isMergedTable(o.table) && (
+                    <span title={`Merged party across tables ${tableGroupNumbers(o.table).join(", ")} — ordered from table ${o.table}`}
+                      style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, padding: "2px 6px", borderRadius: 5, background: "#ede9fe", color: "#6d28d9", verticalAlign: "middle" }}>
+                      ⇄ MERGED · from T{o.table}
+                    </span>
+                  )}
+                  {o.isVIP && <span style={{ color: "#eab308" }}> ★</span>} {o.orderType === "takeaway" && <span style={{ color: "#8b5cf6" }}>📦</span>}
+                </span>
                 <span style={{ fontSize: 12, color: "#888" }}>{new Date(o.createdAt).toLocaleString()}</span>
               </div>
               {o.items.map((it, i) => (
@@ -2404,9 +2415,13 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     if (dashboardView === "items") return renderItemsSoldAnalytics();
 
     const currentSection = ORDER_SECTIONS.find((s) => s.key === orderFilter);
+    // Keep a merged party's orders adjacent in the list, so the two halves of
+    // one table's order don't end up separated by three unrelated tables.
+    const groupSortKey = (o) => tableGroupNumbers(o.table)[0];
     // For "billed", collapse a merged group's duplicate per-table bills into one
     // display card — they carry the same consolidated total (see generateBill).
-    let currentData = orderDataByKey[orderFilter] || [];
+    let currentData = [...(orderDataByKey[orderFilter] || [])]
+      .sort((a, b) => groupSortKey(a) - groupSortKey(b) || a.createdAt - b.createdAt);
     let billedTableLabels = {};
     if (orderFilter === "billed") {
       const seenGroups = new Set();
@@ -2544,12 +2559,14 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                 {orderFilter === "billed" && currentData.map((o) => (
                   <div key={o.id} className="card" style={{ padding: 16, borderRadius: 14 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                      <span style={{ fontWeight: 700 }}>Table {billedTableLabels[o.id] || o.table}</span>
+                      <span style={{ fontWeight: 700 }}>
+                        Table {billedTableLabels[o.id] || orderTableLabel(o)}
+                      </span>
                       <span className="badge badge-billed">billed</span>
                     </div>
-                    {(o.customerName || o.customerPhone || o.paymentMethod) && (
+                    {(customerFor(o).name || customerFor(o).phone || o.paymentMethod) && (
                       <div style={{ fontSize: 11.5, color: "#888", marginBottom: 8, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                        {(o.customerName || o.customerPhone) && <span>👤 {o.customerName || ""} {o.customerPhone ? `· ${o.customerPhone}` : ""}</span>}
+                        {(customerFor(o).name || customerFor(o).phone) && <span>👤 {customerFor(o).name} {customerFor(o).phone ? `· ${customerFor(o).phone}` : ""}</span>}
                         {o.paymentMethod && <span style={{ textTransform: "capitalize" }}>💳 {o.paymentMethod}</span>}
                       </div>
                     )}
@@ -3624,9 +3641,9 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     <div style={{ position: "fixed", inset: 0, zIndex: 999, background: "linear-gradient(135deg, #1a1a2e 0%, #241f3d 55%, #2d1b1b 100%)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", cursor: "pointer", opacity: splashLeaving ? 0 : 1, transition: "opacity 0.5s ease" }} onClick={dismissSplash}>
       <div style={{ animation: "splashPop 0.9s cubic-bezier(0.22, 1, 0.36, 1)", textAlign: "center", padding: 20 }}>
         {profile?.logoUrl && <img src={profile.logoUrl} alt="" style={{ width: 74, height: 74, borderRadius: "50%", objectFit: "cover", margin: "0 auto 20px", display: "block", border: "3px solid rgba(232,163,61,0.6)", animation: "splashGlow 2.2s ease-in-out infinite" }} />}
-        <div style={{ fontFamily: "'Fraunces', serif", fontSize: isMobile ? 30 : 44, fontWeight: 700, color: "#fff", letterSpacing: 0.5, animation: "splashLetters 1s ease" }}>{profile?.name || "Table Order"}</div>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: isMobile ? 30 : 44, fontWeight: 700, color: "#fff", letterSpacing: 0.5, animation: "splashLetters 1s ease" }}>{profile?.name || "Cabadra"}</div>
         <div style={{ width: 46, height: 2, background: "#e8a33d", margin: "16px auto", animation: "splashLine 0.9s ease 0.3s both" }} />
-        <div style={{ fontSize: 12.5, color: "rgba(255,255,255,0.55)", letterSpacing: 1.5, textTransform: "uppercase", animation: "splashFade 1s ease 0.5s both" }}>Powered by Table Order</div>
+        <div style={{ fontSize: 12.5, color: "rgba(255,255,255,0.55)", letterSpacing: 1.5, textTransform: "uppercase", animation: "splashFade 1s ease 0.5s both" }}>Powered by Cabadra</div>
       </div>
     </div>
   );
@@ -3879,7 +3896,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
         <div style={{ padding: sidebarCollapsed && !isMobile ? "16px 0" : 20, borderTop: "1px solid rgba(255,255,255,0.08)", fontSize: 11.5, color: "rgba(255,255,255,0.4)", textAlign: sidebarCollapsed && !isMobile ? "center" : "left" }}>
           {sidebarCollapsed && !isMobile ? "T.O." : (
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <span>Powered by Table Order</span>
+              <span>Powered by Cabadra</span>
               <button onClick={logout} style={{ background: "rgba(220,38,38,0.15)", border: "none", color: "#fca5a5", padding: "8px 12px", borderRadius: 8, cursor: "pointer", fontSize: 12, fontWeight: 700, width: "100%" }}>Logout {role ? `(${role})` : ""}</button>
             </div>
           )}

@@ -1,4 +1,4 @@
-const CACHE_NAME = "table-order-staff-v1";
+const CACHE_NAME = "cabadra-staff-v1";
 const STATIC_ASSETS = [
   "/",
   "/receptionist",

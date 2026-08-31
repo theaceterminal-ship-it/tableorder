@@ -39,7 +39,7 @@ export default function Home() {
       <div style={{ animation: "splashPop 0.9s cubic-bezier(0.22, 1, 0.36, 1)", textAlign: "center", padding: 20 }}>
         <div style={{ fontSize: 52, marginBottom: 20, animation: "splashFade 0.8s ease 0.3s both" }}>🍽️</div>
         <div style={{ fontFamily: "Georgia, serif", fontSize: 42, fontWeight: 700, color: "#fff", letterSpacing: 0.5, animation: "splashFade 0.8s ease 0.5s both" }}>
-          Table Order
+          Cabadra
         </div>
         <div style={{ width: 50, height: 2, background: "#e8a33d", margin: "18px auto", animation: "splashLine 0.7s ease 0.7s both" }} />
         <div style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", letterSpacing: 2, textTransform: "uppercase", animation: "splashFade 0.8s ease 0.9s both" }}>
