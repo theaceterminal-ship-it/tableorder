@@ -1,0 +1,34 @@
+Name,Price,Category,Description,FoodType,ChefSpecial,Featured,ImageUrl,EtaMinutes
+Paneer Tikka,280,Starters,"Char-grilled cottage cheese with peppers, onion and a mint chutney",veg,true,true,,18
+Chicken 65,320,Starters,"Fiery Chennai-style fried chicken, curry leaf and yoghurt",nonveg,false,true,,20
+Hara Bhara Kebab,240,Starters,Spinach and green pea patties,veg,false,false,,15
+Chilli Paneer,290,Starters,"Indo-Chinese, tossed with capsicum and spring onion",veg,false,false,,16
+Tomato Shorba,150,Soups,Slow-simmered tomato broth with cracked pepper,veg,false,false,,10
+Sweet Corn Soup,160,Soups,,veg,false,false,,10
+Butter Chicken,420,Mains,"Slow-cooked in tomato, butter and cream",nonveg,true,true,,25
+Dal Makhani,320,Mains,"Black lentils, simmered overnight",veg,true,false,,22
+Kadhai Paneer,340,Mains,"Cottage cheese with bell pepper, ginger and crushed coriander",veg,false,false,,20
+Rogan Josh,460,Mains,"Kashmiri lamb curry, fennel and dried ginger",nonveg,false,false,,30
+Palak Paneer,310,Mains,Spinach and cottage cheese,veg,false,false,,20
+Chana Masala,260,Mains,Chickpeas in an onion-tomato masala,veg,false,false,,18
+Hyderabadi Chicken Biryani,440,Biryani,"Sealed-pot dum biryani, served with raita and salan",nonveg,true,true,,35
+Vegetable Dum Biryani,360,Biryani,"Seasonal vegetables, saffron and fried onion",veg,false,false,,32
+Butter Naan,60,Breads & Rice,,veg,false,false,,8
+Garlic Naan,70,Breads & Rice,"Fresh garlic, coriander butter",veg,false,true,,8
+Tandoori Roti,40,Breads & Rice,,veg,false,false,,6
+Laccha Paratha,70,Breads & Rice,Layered whole-wheat flatbread,veg,false,false,,10
+Jeera Rice,180,Breads & Rice,Basmati tempered with cumin,veg,false,false,,12
+Steamed Rice,120,Breads & Rice,,veg,false,false,,10
+Masala Papad,80,Sides,"Roasted papad, onion, tomato and chaat masala",veg,false,false,,5
+Boondi Raita,110,Sides,,veg,false,false,,5
+Green Salad,120,Sides,"Cucumber, onion, carrot and lemon",veg,false,false,,5
+Fresh Lime Soda,110,Beverages,"Sweet, salted or mixed",veg,false,false,,4
+Masala Chaas,90,Beverages,Spiced buttermilk with roasted cumin,veg,false,false,,4
+Sweet Lassi,130,Beverages,,veg,false,true,,6
+Virgin Mojito,180,Beverages,"Lime, mint and soda",veg,false,true,,6
+Filter Coffee,90,Beverages,,veg,false,false,,5
+Masala Chai,70,Beverages,,veg,false,false,,5
+Gulab Jamun,140,Desserts,"Two pieces, served warm",veg,false,true,,6
+Gajar Ka Halwa,180,Desserts,"Slow-cooked carrot halwa, khoya and almond",veg,true,false,,8
+Rasmalai,170,Desserts,,veg,false,false,,6
+Sizzling Brownie,260,Desserts,"Walnut brownie, vanilla ice cream, hot chocolate",veg,false,true,,12

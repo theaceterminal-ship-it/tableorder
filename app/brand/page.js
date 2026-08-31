@@ -16,7 +16,7 @@ import {
   fetchOutlets, fetchBrandToday, createOutlet, renameOutlet,
   fetchMasterMenu, addMasterItem, deleteMasterItem,
   listBrandMembers, listOutletStaff, removeBrandMember, removeOutletStaff,
-  importMasterItems, updateMyMemberProfile, updateBrandIdentity,
+  importMasterItems, updateMyProfile, updateBrandIdentity,
 } from "@/lib/brand";
 import { parseMenuText, MENU_CSV_TEMPLATE } from "@/lib/menu-import";
 import { uploadToCloudinary } from "@/lib/firebase";
@@ -658,7 +658,11 @@ function BrandConsoleInner() {
                 </div>
                 <button style={btnPrimary} disabled={busy}
                   onClick={() => run(async () => {
-                    await updateMyMemberProfile(brandId, user.uid, myProfile);
+                    await updateMyProfile({
+                      brandId, uid: user.uid, scope: access.scope,
+                      outletIds: access.outletIds.length ? access.outletIds : visibleOutletIds,
+                      ...myProfile,
+                    });
                     setSavedNote("Profile saved.");
                   })}>
                   Save
