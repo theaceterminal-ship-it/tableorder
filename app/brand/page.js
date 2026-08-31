@@ -16,7 +16,10 @@ import {
   fetchOutlets, fetchBrandToday, createOutlet, renameOutlet,
   fetchMasterMenu, addMasterItem, deleteMasterItem,
   listBrandMembers, listOutletStaff, removeBrandMember, removeOutletStaff,
+  importMasterItems, updateMyMemberProfile, updateBrandIdentity,
 } from "@/lib/brand";
+import { parseMenuText, MENU_CSV_TEMPLATE } from "@/lib/menu-import";
+import { uploadToCloudinary } from "@/lib/firebase";
 import {
   can, canAccessOutlet, canInvite, ROLE_LABELS, TIER_LABELS, ROLES,
   tierLimits, canAddOutlet,
@@ -58,6 +61,12 @@ function BrandConsoleInner() {
   const [newOutlet, setNewOutlet] = useState({ name: "", address: "" });
   const [inviteForm, setInviteForm] = useState({ email: "", role: "", outletIds: [] });
   const [inviteError, setInviteError] = useState("");
+  const [importText, setImportText] = useState("");
+  const [importFormat, setImportFormat] = useState("csv");
+  const [importPreview, setImportPreview] = useState(null);
+  const [myProfile, setMyProfile] = useState({ name: "", phone: "" });
+  const [identity, setIdentity] = useState({ name: "", logoUrl: "", accentColor: "#e8a33d" });
+  const [savedNote, setSavedNote] = useState("");
   const [newItem, setNewItem] = useState({ name: "", price: "", category: "Mains", foodType: "veg", description: "" });
 
   // Only outlets this person actually reaches. An owner reaches all of them;
@@ -102,6 +111,9 @@ function BrandConsoleInner() {
     setInvites(inv);
     setMembers(mem);
     setStaff(st);
+
+    const me = mem.find((x) => x.uid === user?.uid);
+    if (me) setMyProfile({ name: me.name || "", phone: me.phone || "" });
     setError(failures.length === 0 ? "" :
       `Could not load ${failures.join(", ")}. If these say permission-denied, deploy the latest rules: firebase deploy --only firestore:rules`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -158,16 +170,28 @@ function BrandConsoleInner() {
     { key: "outlets", label: `Outlets (${outlets.length})` },
     ...(can(access, "editMasterMenu") ? [{ key: "menu", label: "Master menu" }] : []),
     { key: "team", label: "Team" },
+    { key: "settings", label: isOwner ? "Brand & profile" : "My profile" },
   ];
+
+  const accent = brand.accentColor || "#e8a33d";
 
   return (
     <div style={{ minHeight: "100vh", background: "#faf9f7" }}>
       <header style={{ background: "#fff", borderBottom: "1px solid #e6e1d6", padding: "16px 24px" }}>
         <div style={{ maxWidth: 1100, margin: "0 auto", display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
-          <div>
-            <div style={{ fontSize: 17, fontWeight: 800, color: "#1a1a2e" }}>{brand.name}</div>
-            <div style={{ fontSize: 12, color: "#888" }}>
-              {TIER_LABELS[brand.tier] || brand.tier} · {ROLE_LABELS[access.role]}
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {brand.logoUrl ? (
+              <img src={brand.logoUrl} alt="" style={{ width: 40, height: 40, borderRadius: 10, objectFit: "cover", border: `2px solid ${accent}` }} />
+            ) : (
+              <div style={{ width: 40, height: 40, borderRadius: 10, background: accent, display: "grid", placeItems: "center", color: "#fff", fontWeight: 800, fontSize: 17 }}>
+                {(brand.name || "?").charAt(0).toUpperCase()}
+              </div>
+            )}
+            <div>
+              <div style={{ fontSize: 17, fontWeight: 800, color: "#1a1a2e" }}>{brand.name}</div>
+              <div style={{ fontSize: 12, color: "#888" }}>
+                {TIER_LABELS[brand.tier] || brand.tier} · {ROLE_LABELS[access.role]}
+              </div>
             </div>
           </div>
           <div style={{ flex: 1 }} />
@@ -362,6 +386,89 @@ function BrandConsoleInner() {
             </div>
 
             <div style={card}>
+              <h3 style={{ fontSize: 14.5, fontWeight: 800, margin: "0 0 4px" }}>Bulk import</h3>
+              <p style={{ fontSize: 12.5, color: "#888", margin: "0 0 14px", lineHeight: 1.6 }}>
+                Paste a CSV or JSON menu, or upload a file. Rows without a name or a usable price
+                are skipped rather than imported broken, and names already on the master menu are
+                left alone so you can re-import a corrected file safely.
+              </p>
+
+              <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+                {["csv", "json"].map((f) => (
+                  <button key={f} onClick={() => { setImportFormat(f); setImportPreview(null); }}
+                    style={{ ...btn, padding: "7px 14px", fontSize: 12.5, background: importFormat === f ? "#1a1a2e" : "#fff", color: importFormat === f ? "#fff" : "#1a1a2e", border: importFormat === f ? "1px solid #1a1a2e" : "1px solid #e6e1d6" }}>
+                    {f.toUpperCase()}
+                  </button>
+                ))}
+                <input type="file" accept=".csv,.json,.txt" style={{ fontSize: 12.5 }}
+                  onChange={async (e) => {
+                    const f = e.target.files?.[0];
+                    if (!f) return;
+                    const text = await f.text();
+                    setImportText(text);
+                    setImportFormat(f.name.toLowerCase().endsWith(".json") ? "json" : "csv");
+                    setImportPreview(null);
+                  }} />
+                <button style={{ ...btn, padding: "7px 14px", fontSize: 12.5 }}
+                  onClick={() => {
+                    const blob = new Blob([MENU_CSV_TEMPLATE], { type: "text/csv" });
+                    const a = document.createElement("a");
+                    a.href = URL.createObjectURL(blob);
+                    a.download = "master-menu-template.csv";
+                    a.click();
+                  }}>
+                  Download template
+                </button>
+              </div>
+
+              <textarea value={importText} onChange={(e) => { setImportText(e.target.value); setImportPreview(null); }}
+                rows={6} placeholder={importFormat === "csv" ? "Name,Price,Category,Description,FoodType" : '[{ "name": "Paneer Tikka", "price": 280 }]'}
+                style={{ ...input, fontFamily: "monospace", fontSize: 12.5, resize: "vertical" }} />
+
+              <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                <button style={btn} disabled={!importText.trim()}
+                  onClick={() => setImportPreview(parseMenuText(importText, importFormat))}>
+                  Preview
+                </button>
+                {importPreview?.items?.length > 0 && (
+                  <button style={btnPrimary} disabled={busy}
+                    onClick={() => run(async () => {
+                      const res = await importMasterItems(brandId, importPreview.items, master);
+                      setImportPreview(null);
+                      setImportText("");
+                      setSavedNote(res.added === 0
+                        ? `Nothing added — all ${res.duplicates} were already on the master menu.`
+                        : `Added ${res.added} item${res.added === 1 ? "" : "s"}${res.duplicates ? `, skipped ${res.duplicates} already present` : ""}.`);
+                    })}>
+                    Import {importPreview.items.length} item{importPreview.items.length === 1 ? "" : "s"}
+                  </button>
+                )}
+              </div>
+
+              {importPreview && (
+                <div style={{ marginTop: 12, padding: 12, borderRadius: 10, fontSize: 13,
+                  background: importPreview.error ? "#fef2f2" : "#f0fdf4",
+                  border: `1px solid ${importPreview.error ? "#fecaca" : "#bbf7d0"}`,
+                  color: importPreview.error ? "#b91c1c" : "#166534" }}>
+                  {importPreview.error || `Ready to import ${importPreview.items.length} item${importPreview.items.length === 1 ? "" : "s"}.`}
+                  {importPreview.skipped?.length > 0 && (
+                    <div style={{ marginTop: 6, fontSize: 12 }}>
+                      Skipping {importPreview.skipped.length} row{importPreview.skipped.length === 1 ? "" : "s"}:{" "}
+                      {importPreview.skipped.slice(0, 4).map((sk) => `line ${sk.line} (${sk.reason})`).join(", ")}
+                      {importPreview.skipped.length > 4 ? "…" : ""}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {savedNote && (
+                <div style={{ marginTop: 12, padding: 12, borderRadius: 10, fontSize: 13, background: "#f0fdf4", border: "1px solid #bbf7d0", color: "#166534" }}>
+                  {savedNote}
+                </div>
+              )}
+            </div>
+
+            <div style={card}>
               <h3 style={{ fontSize: 14.5, fontWeight: 800, margin: "0 0 12px" }}>{master.length} item{master.length === 1 ? "" : "s"}</h3>
               {master.length === 0 ? (
                 <p style={{ color: "#888", fontSize: 14 }}>Nothing here yet. Items you add become available to every outlet.</p>
@@ -524,6 +631,115 @@ function BrandConsoleInner() {
                 </div>
               ))}
             </div>
+          </>
+        )}
+        {/* ------------------------------------------------------ settings */}
+        {tab === "settings" && (
+          <>
+            {/* Everyone edits their own name and contact. The rules pin role and
+                outlet assignment to their current values, so this can never
+                become a route to self-promotion. */}
+            <div style={card}>
+              <h2 style={{ fontSize: 16, fontWeight: 800, margin: "0 0 4px" }}>Your profile</h2>
+              <p style={{ fontSize: 12.5, color: "#888", margin: "0 0 16px" }}>
+                How you appear to the rest of the team. Your role and outlets are set by
+                whoever invited you.
+              </p>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 10, alignItems: "end" }}>
+                <div>
+                  <label style={label}>Name</label>
+                  <input style={input} value={myProfile.name}
+                    onChange={(e) => setMyProfile((p) => ({ ...p, name: e.target.value }))} />
+                </div>
+                <div>
+                  <label style={label}>Contact number</label>
+                  <input style={input} value={myProfile.phone} placeholder="+91…"
+                    onChange={(e) => setMyProfile((p) => ({ ...p, phone: e.target.value }))} />
+                </div>
+                <button style={btnPrimary} disabled={busy}
+                  onClick={() => run(async () => {
+                    await updateMyMemberProfile(brandId, user.uid, myProfile);
+                    setSavedNote("Profile saved.");
+                  })}>
+                  Save
+                </button>
+              </div>
+              <div style={{ fontSize: 12, color: "#aaa", marginTop: 10 }}>
+                {user?.email} · {ROLE_LABELS[access.role]}
+              </div>
+            </div>
+
+            {isOwner && (
+              <div style={card}>
+                <h2 style={{ fontSize: 16, fontWeight: 800, margin: "0 0 4px" }}>Your brand</h2>
+                <p style={{ fontSize: 12.5, color: "#888", margin: "0 0 16px", lineHeight: 1.6 }}>
+                  Your name, logo, and colour appear across this console and on your
+                  staff&rsquo;s screens. Each outlet keeps its own logo and address for the
+                  diner-facing menu, set from that outlet&rsquo;s POS.
+                </p>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 160px", gap: 12, marginBottom: 14 }}>
+                  <div>
+                    <label style={label}>Brand name</label>
+                    <input style={input} value={identity.name || brand.name || ""}
+                      onChange={(e) => setIdentity((p) => ({ ...p, name: e.target.value }))} />
+                  </div>
+                  <div>
+                    <label style={label}>Accent colour</label>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <input type="color" value={identity.accentColor || accent}
+                        onChange={(e) => setIdentity((p) => ({ ...p, accentColor: e.target.value }))}
+                        style={{ width: 46, height: 40, padding: 2, border: "1px solid #e6e1d6", borderRadius: 10, cursor: "pointer", background: "#fff" }} />
+                      <span style={{ fontFamily: "monospace", fontSize: 12.5, color: "#888" }}>
+                        {identity.accentColor || accent}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <label style={label}>Logo</label>
+                <div style={{ display: "flex", gap: 14, alignItems: "center", marginBottom: 16 }}>
+                  {(identity.logoUrl || brand.logoUrl) ? (
+                    <img src={identity.logoUrl || brand.logoUrl} alt="" style={{ width: 64, height: 64, borderRadius: 12, objectFit: "cover", border: "1px solid #e6e1d6" }} />
+                  ) : (
+                    <div style={{ width: 64, height: 64, borderRadius: 12, background: identity.accentColor || accent, display: "grid", placeItems: "center", color: "#fff", fontWeight: 800, fontSize: 26 }}>
+                      {(identity.name || brand.name || "?").charAt(0).toUpperCase()}
+                    </div>
+                  )}
+                  <input type="file" accept="image/*" style={{ fontSize: 12.5 }}
+                    onChange={async (e) => {
+                      const f = e.target.files?.[0];
+                      if (!f) return;
+                      if (!f.type.startsWith("image/")) return setSavedNote("That file is not an image.");
+                      if (f.size > 5 * 1024 * 1024) return setSavedNote("Logo must be under 5MB.");
+                      try {
+                        const url = await uploadToCloudinary(f);
+                        setIdentity((p) => ({ ...p, logoUrl: url }));
+                      } catch (err) {
+                        setSavedNote(`Logo upload failed: ${err.message}`);
+                      }
+                    }} />
+                </div>
+
+                <button style={btnPrimary} disabled={busy}
+                  onClick={() => run(async () => {
+                    await updateBrandIdentity(brandId, {
+                      name: identity.name || brand.name,
+                      logoUrl: identity.logoUrl ?? brand.logoUrl ?? "",
+                      accentColor: identity.accentColor || accent,
+                    });
+                    setSavedNote("Brand updated.");
+                  })}>
+                  Save brand
+                </button>
+              </div>
+            )}
+
+            {savedNote && (
+              <div style={{ ...card, background: "#f0fdf4", borderColor: "#bbf7d0", color: "#166534", fontSize: 13.5 }}>
+                {savedNote}
+              </div>
+            )}
           </>
         )}
       </div>

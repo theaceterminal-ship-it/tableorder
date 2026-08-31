@@ -93,11 +93,15 @@ service cloud.firestore {
     // Full management of one outlet: brand owner, or an outlet manager whose
     // assignment list contains it. Mirrors canAccessOutlet() in lib/tenancy.js.
     function canManageOutlet(outletId) {
+      // brandMemberOutlets takes a BRAND id. An earlier version passed the
+      // outlet id here, which resolved brands/{outletId}/members/{uid} -- a
+      // document that never exists -- so the whole clause failed and no outlet
+      // manager could manage anything at all, including their own outlet.
       return signedIn() && (
         isBrandOwner(outletBrandId(outletId))
         || (hasBrandMembership(outletBrandId(outletId))
             && brandRole(outletBrandId(outletId)) == 'outlet_manager'
-            && outletId in brandMemberOutlets(outletId))
+            && outletId in brandMemberOutlets(outletBrandId(outletId)))
       );
     }
 
@@ -268,8 +272,17 @@ service cloud.firestore {
                           && request.resource.data.role in ['brand_manager', 'outlet_manager']
                           && request.resource.data.outletIds == myInvite().outletIds);
 
-        allow update: if isBrandOwner(brandId)
-                      && request.resource.data.role in ['brand_manager', 'outlet_manager'];
+        // An owner changes someone's role or outlet assignment. A member edits
+        // their OWN name and phone and nothing else -- role and outletIds are
+        // pinned to their current values, so self-service profile editing can
+        // never become self-promotion.
+        allow update: if (isBrandOwner(brandId)
+                          && request.resource.data.role in ['brand_manager', 'outlet_manager'])
+                      || (uid() == memberUid
+                          && request.resource.data.role == resource.data.role
+                          && request.resource.data.outletIds == resource.data.outletIds
+                          && request.resource.data.diff(resource.data).affectedKeys()
+                               .hasOnly(['name', 'phone', 'email']));
 
         allow delete: if isBrandOwner(brandId) && uid() != memberUid;
       }
@@ -454,7 +467,12 @@ service cloud.firestore {
                           && myInvite().role == request.resource.data.role
                           && request.resource.data.role in ['reception', 'kitchen']
                           && outletId in myInvite().outletIds);
-        allow update, delete: if canManageOutlet(outletId);
+        allow update: if canManageOutlet(outletId)
+                      || (uid() == staffUid
+                          && request.resource.data.role == resource.data.role
+                          && request.resource.data.diff(resource.data).affectedKeys()
+                               .hasOnly(['name', 'phone', 'email']));
+        allow delete: if canManageOutlet(outletId);
       }
 
       // Pre-aggregated rollups and recommendation models. Written by a trusted
