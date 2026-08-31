@@ -144,6 +144,20 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // Every subscription decision the platform operator makes — approve,
+    // reject, suspend, extend — with who did it and why.
+    //
+    // APPEND-ONLY, including for platform admins. Create is allowed; update and
+    // delete are denied to everyone, with no exception and no override. A log
+    // its own operator can rewrite is not evidence of anything, and the point of
+    // keeping it is to have something quotable when a customer disputes a bill.
+    match /auditLog/{entryId} {
+      allow read: if isPlatformAdmin();
+      allow create: if isPlatformAdmin()
+                    && request.resource.data.actorUid == uid();
+      allow update, delete: if false;
+    }
+
     match /orgs/{orgId} {
       allow read: if isPlatformAdmin()
                   || (signedIn() && resource.data.get('ownerUid', '') == uid());
