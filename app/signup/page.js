@@ -1,11 +1,25 @@
 "use client";
 
+// Signup, rebuilt for the brand/outlet model.
+//
+// Flow: choose organisation type -> brand & outlet details -> sign in ->
+// choose plan -> pay -> submitted for approval.
+//
+// THE WRITE ORDER BELOW IS LOad-BEARING. Security rules grant each step on the
+// basis of the previous one, so it must run brand -> membership -> outlet ->
+// outlet documents -> user. Reordering it breaks account creation outright,
+// which is exactly what happened before. See firestore.rules.
+
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { auth, db, googleProvider, uploadToCloudinary } from "@/lib/firebase";
 import { signInWithPopup } from "firebase/auth";
-import { doc, setDoc, serverTimestamp } from "firebase/firestore";
-import { PLAN_FEATURES, PLAN_PRICING, PLAN_LABELS, PLAN_ORDER, HOTEL_STATUS, PLATFORM_UPI_ID, PLATFORM_PAYEE_NAME } from "@/lib/plans";
+import { doc, setDoc, collection, serverTimestamp } from "firebase/firestore";
+import {
+  PLAN_FEATURES, PLAN_PRICING, PLAN_LABELS, HOTEL_STATUS,
+  PLATFORM_UPI_ID, PLATFORM_PAYEE_NAME,
+} from "@/lib/plans";
+import { TIERS, TIER_LABELS, ROLES, tierLimits } from "@/lib/tenancy";
 
 const FEATURE_LABELS = {
   floors: "Multiple floors", vipTables: "VIP tables", combos: "Combo packs",
@@ -13,16 +27,56 @@ const FEATURE_LABELS = {
   brandColor: "Custom branding", promoBanner: "Promo banner", rating: "Guest ratings",
 };
 
+// Which feature plans each organisation type may buy. Multi-outlet needs the
+// brand console, which base does not include, so it starts at mid.
+const PLANS_FOR_TIER = {
+  [TIERS.SINGLE]: ["base", "mid", "pro"],
+  [TIERS.MULTI]: ["mid", "pro"],
+  [TIERS.ENTERPRISE]: [],
+};
+
+const ORG_TYPES = [
+  {
+    tier: TIERS.SINGLE,
+    icon: "🍽️",
+    blurb: "One restaurant, one dashboard.",
+    points: ["A single outlet", "POS, billing, kitchen board", "Reception and kitchen staff"],
+  },
+  {
+    tier: TIERS.MULTI,
+    icon: "🏢",
+    blurb: "A brand with several branches.",
+    points: ["Up to 25 outlets", "One master menu, local prices", "Managers across many outlets", "All branches in one view"],
+  },
+  {
+    tier: TIERS.ENTERPRISE,
+    icon: "🏛️",
+    blurb: "Several brands, or something bespoke.",
+    points: ["Unlimited outlets", "Multiple brands in one group", "White-label and integrations", "Priced per agreement"],
+  },
+];
+
+const wrap = { minHeight: "100vh", background: "linear-gradient(135deg, #faf8f5 0%, #f5f3ef 100%)", padding: "40px 20px" };
+const card = { maxWidth: 640, margin: "0 auto", background: "#fff", border: "1px solid #e6e1d6", borderRadius: 20, padding: 32, boxShadow: "0 8px 32px rgba(26,26,46,0.07)" };
+const input = { width: "100%", padding: "12px 14px", border: "1px solid #e6e1d6", borderRadius: 10, fontSize: 14.5, marginBottom: 14, boxSizing: "border-box", fontFamily: "inherit" };
+const label = { fontSize: 12, fontWeight: 800, color: "#6b6b7b", textTransform: "uppercase", letterSpacing: 0.4, display: "block", marginBottom: 6 };
+const primaryBtn = { width: "100%", padding: "14px 20px", borderRadius: 12, border: "none", background: "#1a1a2e", color: "#fff", fontWeight: 800, fontSize: 15, cursor: "pointer" };
+const ghostBtn = { background: "none", border: "none", color: "#6b6b7b", fontSize: 13.5, cursor: "pointer", textDecoration: "underline", marginTop: 14 };
+
 export default function SignupPage() {
-  const [step, setStep] = useState("details"); // details -> signin -> plan -> payment -> done
-  const [form, setForm] = useState({ name: "", tagline: "", address: "", logoUrl: "" });
+  const [step, setStep] = useState("orgType"); // orgType -> details -> signin -> plan -> payment -> done
+  const [tier, setTier] = useState(null);
+  const [form, setForm] = useState({ brandName: "", outletName: "", tagline: "", address: "", logoUrl: "" });
   const [logoUploading, setLogoUploading] = useState(false);
   const [firebaseUser, setFirebaseUser] = useState(null);
   const [selectedPlan, setSelectedPlan] = useState("mid");
   const [txnRef, setTxnRef] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [submitted, setSubmitted] = useState(null);
   const router = useRouter();
+
+  const isEnterprise = tier === TIERS.ENTERPRISE;
 
   async function handleLogoUpload(file) {
     if (!file) return;
@@ -39,8 +93,15 @@ export default function SignupPage() {
     }
   }
 
+  function chooseTier(t) {
+    setTier(t);
+    setSelectedPlan(PLANS_FOR_TIER[t][0] || "pro");
+    setError("");
+    setStep("details");
+  }
+
   function goToSignIn() {
-    if (!form.name.trim()) { setError("Restaurant name is required"); return; }
+    if (!form.brandName.trim()) { setError(isEnterprise || tier === TIERS.MULTI ? "Brand name is required" : "Restaurant name is required"); return; }
     setError("");
     setStep("signin");
   }
@@ -51,7 +112,9 @@ export default function SignupPage() {
     try {
       const result = await signInWithPopup(auth, googleProvider);
       setFirebaseUser(result.user);
-      setStep("plan");
+      // Enterprise is priced per agreement, so there is nothing to pay yet —
+      // it goes straight to the approvals queue for a human conversation.
+      setStep(isEnterprise ? "payment" : "plan");
     } catch (err) {
       setError(err.message);
     } finally {
@@ -59,156 +122,287 @@ export default function SignupPage() {
     }
   }
 
-  function confirmPlan() {
-    setStep("payment");
-  }
-
-  async function submitPayment() {
-    if (!txnRef.trim()) { setError("Please enter your transaction reference / UTR number"); return; }
+  async function submitForApproval() {
+    if (!isEnterprise && !txnRef.trim()) {
+      setError("Please enter your transaction reference / UTR number");
+      return;
+    }
     setError("");
     setLoading(true);
     try {
-      const restaurantId = firebaseUser.uid;
+      const uid = firebaseUser.uid;
+      const brandId = doc(collection(db, "brands")).id;
+      const outletId = doc(collection(db, "restaurants")).id;
+      const now = Date.now();
 
-      await setDoc(doc(db, "restaurants", restaurantId, "info", "profile"), {
-        name: form.name.trim(), tagline: form.tagline, address: form.address,
-        logoUrl: form.logoUrl, email: firebaseUser.email, createdAt: serverTimestamp(),
+      // 1. The brand. Must name its creator as owner and may only be submitted
+      //    into a pending state — no client can activate its own subscription.
+      await setDoc(doc(db, "brands", brandId), {
+        ownerUid: uid,
+        orgId: null, // Enterprise multi-brand hook; unused for now
+        name: form.brandName.trim(),
+        tier,
+        subscription: {
+          status: HOTEL_STATUS.PENDING_APPROVAL,
+          plan: isEnterprise ? "pro" : selectedPlan,
+          planAmount: isEnterprise ? null : PLAN_PRICING[selectedPlan].amount,
+          txnRef: isEnterprise ? null : txnRef.trim(),
+          ownerEmail: firebaseUser.email,
+          submittedAt: now,
+        },
+        outletIds: [outletId],
+        createdAt: now,
+        updatedAt: serverTimestamp(),
       });
-      await setDoc(doc(db, "restaurants", restaurantId, "info", "billing"), {
+
+      // 2. Ownership. Allowed because we just created the brand naming this uid.
+      await setDoc(doc(db, "brands", brandId, "members", uid), {
+        role: ROLES.BRAND_OWNER,
+        outletIds: [outletId],
+        addedAt: now,
+      });
+
+      // 3. The first outlet. Its id is generated, not the owner's uid — that
+      //    coupling is what made chains impossible.
+      await setDoc(doc(db, "restaurants", outletId), {
+        brandId,
+        name: form.outletName.trim() || form.brandName.trim(),
+        createdAt: now,
+      });
+
+      // 4. Outlet documents. Permitted now that the outlet carries its brandId.
+      await setDoc(doc(db, "restaurants", outletId, "info", "profile"), {
+        name: form.outletName.trim() || form.brandName.trim(),
+        tagline: form.tagline, address: form.address, logoUrl: form.logoUrl,
+        email: firebaseUser.email, createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(db, "restaurants", outletId, "info", "billing"), {
         taxPercent: 5, servicePercent: 0, upiId: "",
       });
-      await setDoc(doc(db, "users", restaurantId), {
-        restaurantId, role: "reception", email: firebaseUser.email, name: firebaseUser.displayName || "",
-        isCreator: true, addedAt: serverTimestamp(),
-      });
-      await setDoc(doc(db, "restaurants", restaurantId, "staff", restaurantId), {
-        email: firebaseUser.email, name: firebaseUser.displayName || "", role: "reception",
-        uid: restaurantId, status: "active", addedAt: serverTimestamp(),
-      });
-      await setDoc(doc(db, "hotels", restaurantId), {
-        status: HOTEL_STATUS.PENDING_APPROVAL,
-        plan: selectedPlan,
-        planAmount: PLAN_PRICING[selectedPlan].amount,
-        txnRef: txnRef.trim(),
-        ownerEmail: firebaseUser.email,
-        createdAt: Date.now(),
-        submittedAt: Date.now(),
-      });
 
+      // 5. Routing hints only. Never read for authorization.
+      await setDoc(doc(db, "users", uid), {
+        brandId, defaultOutletId: outletId,
+        email: firebaseUser.email, name: firebaseUser.displayName || "",
+        isCreator: true, addedAt: serverTimestamp(),
+      }, { merge: true });
+
+      setSubmitted({ brandId, outletId });
       setStep("done");
     } catch (err) {
-      setError(err.message);
+      setError(err?.code ? `${err.code}: ${err.message}` : err.message);
     } finally {
       setLoading(false);
     }
   }
 
-  const containerStyle = { minHeight: "100vh", padding: 24, background: "linear-gradient(135deg, #faf8f5 0%, #f5f3ef 100%)", display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 48 };
-  const inputStyle = { width: "100%", padding: "14px 16px", borderRadius: 12, border: "1px solid #e6e1d6", fontSize: 15, outline: "none", boxSizing: "border-box" };
-  const labelStyle = { display: "block", fontSize: 12, fontWeight: 700, color: "#6b6b7b", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 };
-
   return (
-    <div style={containerStyle}>
-      <div style={{ width: "100%", maxWidth: 480 }}>
-        <div style={{ textAlign: "center", marginBottom: 28 }}>
-          <div style={{ width: 56, height: 56, borderRadius: "50%", background: "#1a1a2e", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px", fontSize: 24 }}>🍽️</div>
-          <h1 style={{ fontSize: 24, fontWeight: 800, color: "#1a1a2e" }}>Set up your restaurant</h1>
-        </div>
-
-        {error && <div style={{ background: "#fef2f2", color: "#dc2626", padding: 12, borderRadius: 10, fontSize: 13, fontWeight: 600, marginBottom: 16 }}>{error}</div>}
-
-        {step === "details" && (
-          <div style={{ background: "#fff", borderRadius: 20, padding: 28, boxShadow: "0 4px 20px rgba(0,0,0,0.06)" }}>
-            <label style={labelStyle}>Restaurant Name *</label>
-            <input style={{ ...inputStyle, marginBottom: 18 }} placeholder="e.g. Spice Garden" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} />
-            <label style={labelStyle}>Tagline</label>
-            <input style={{ ...inputStyle, marginBottom: 18 }} placeholder="e.g. Authentic North Indian Cuisine" value={form.tagline} onChange={(e) => setForm((p) => ({ ...p, tagline: e.target.value }))} />
-            <label style={labelStyle}>Address</label>
-            <input style={{ ...inputStyle, marginBottom: 18 }} placeholder="Restaurant address" value={form.address} onChange={(e) => setForm((p) => ({ ...p, address: e.target.value }))} />
-            <label style={labelStyle}>Logo</label>
-            <input type="file" accept="image/*" onChange={(e) => handleLogoUpload(e.target.files[0])} style={{ display: "none" }} id="signup-logo" />
-            <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 24 }}>
-              <label htmlFor="signup-logo" style={{ padding: "12px 20px", borderRadius: 12, border: "2px dashed #e6e1d6", background: "#faf8f5", cursor: "pointer", fontSize: 14, color: "#6b6b7b", fontWeight: 600 }}>
-                {logoUploading ? "Uploading..." : "📷 Upload Logo"}
-              </label>
-              {form.logoUrl && !logoUploading && <img src={form.logoUrl} alt="" style={{ width: 44, height: 44, borderRadius: 10, objectFit: "cover" }} />}
-            </div>
-            <button onClick={goToSignIn} style={{ width: "100%", padding: 16, borderRadius: 14, border: "none", background: "#e8a33d", color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer" }}>
-              Continue →
-            </button>
-            <p style={{ marginTop: 20, textAlign: "center", fontSize: 13, color: "#aaa" }}>
-              Already have an account? <a href="/login" style={{ color: "#e8a33d", fontWeight: 700, textDecoration: "none" }}>Log in</a>
+    <div style={wrap}>
+      <div style={card}>
+        {/* ---------------------------------------------------- org type */}
+        {step === "orgType" && (
+          <>
+            <h1 style={{ fontSize: 26, fontWeight: 800, color: "#1a1a2e", margin: "0 0 6px" }}>What are you setting up?</h1>
+            <p style={{ color: "#6b6b7b", fontSize: 14.5, margin: "0 0 24px" }}>
+              You can move up a tier later without starting over.
             </p>
-          </div>
-        )}
-
-        {step === "signin" && (
-          <div style={{ background: "#fff", borderRadius: 20, padding: 28, boxShadow: "0 4px 20px rgba(0,0,0,0.06)", textAlign: "center" }}>
-            <p style={{ color: "#6b6b7b", marginBottom: 24, fontSize: 15 }}>Sign in with Google to secure your restaurant account</p>
-            <button onClick={handleGoogleSignIn} disabled={loading} style={{ width: "100%", padding: 14, borderRadius: 12, border: "1px solid #e6e1d6", background: "#fff", fontSize: 15, fontWeight: 600, cursor: loading ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}>
-              {loading ? "Signing in..." : "Sign in with Google"}
-            </button>
-            <button onClick={() => setStep("details")} style={{ marginTop: 16, background: "none", border: "none", color: "#6b6b7b", fontSize: 14, cursor: "pointer" }}>← Go back</button>
-          </div>
-        )}
-
-        {step === "plan" && (
-          <div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 14, marginBottom: 20 }}>
-              {PLAN_ORDER.map((planKey) => {
-                const isSelected = selectedPlan === planKey;
-                const feats = PLAN_FEATURES[planKey];
-                return (
-                  <div key={planKey} onClick={() => setSelectedPlan(planKey)}
-                    style={{ background: "#fff", borderRadius: 18, padding: 22, cursor: "pointer", border: isSelected ? "2px solid #e8a33d" : "2px solid #eee", boxShadow: isSelected ? "0 4px 16px rgba(232,163,61,0.15)" : "none" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                      <span style={{ fontSize: 18, fontWeight: 800, color: "#1a1a2e" }}>{PLAN_LABELS[planKey]}</span>
-                      <span style={{ fontSize: 16, fontWeight: 800, color: "#e8a33d" }}>{PLAN_PRICING[planKey].label}</span>
-                    </div>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                      {Object.entries(feats).filter(([, v]) => v && v !== "none").map(([key]) => (
-                        <span key={key} style={{ fontSize: 11.5, background: "#faf8f5", color: "#6b6b7b", padding: "3px 9px", borderRadius: 100 }}>{FEATURE_LABELS[key] || key}</span>
-                      ))}
-                    </div>
+            <div style={{ display: "grid", gap: 12 }}>
+              {ORG_TYPES.map((o) => (
+                <button
+                  key={o.tier}
+                  onClick={() => chooseTier(o.tier)}
+                  style={{
+                    textAlign: "left", padding: 20, borderRadius: 14, cursor: "pointer",
+                    border: "1.5px solid #e6e1d6", background: "#fff", fontFamily: "inherit",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                    <span style={{ fontSize: 22 }}>{o.icon}</span>
+                    <span style={{ fontSize: 17, fontWeight: 800, color: "#1a1a2e" }}>{TIER_LABELS[o.tier]}</span>
+                    {o.tier === TIERS.ENTERPRISE && (
+                      <span style={{ marginLeft: "auto", fontSize: 10.5, fontWeight: 800, color: "#92400e", background: "#fef3c7", padding: "3px 8px", borderRadius: 6 }}>
+                        CONTACT SALES
+                      </span>
+                    )}
                   </div>
+                  <div style={{ fontSize: 13.5, color: "#6b6b7b", marginBottom: 10 }}>{o.blurb}</div>
+                  <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: "#555" }}>
+                    {o.points.map((p) => <li key={p} style={{ marginBottom: 3 }}>{p}</li>)}
+                  </ul>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* ----------------------------------------------------- details */}
+        {step === "details" && (
+          <>
+            <div style={{ fontSize: 11.5, fontWeight: 800, color: "#e8a33d", letterSpacing: 0.6, textTransform: "uppercase", marginBottom: 8 }}>
+              {TIER_LABELS[tier]}
+            </div>
+            <h1 style={{ fontSize: 24, fontWeight: 800, color: "#1a1a2e", margin: "0 0 20px" }}>
+              {tier === TIERS.SINGLE ? "Tell us about your restaurant" : "Tell us about your brand"}
+            </h1>
+
+            <label style={label}>{tier === TIERS.SINGLE ? "Restaurant name" : "Brand name"} *</label>
+            <input style={input} value={form.brandName} onChange={(e) => setForm((p) => ({ ...p, brandName: e.target.value }))}
+              placeholder={tier === TIERS.SINGLE ? "Spice Garden" : "Spice Garden Group"} />
+
+            {tier !== TIERS.SINGLE && (
+              <>
+                <label style={label}>Your first outlet</label>
+                <input style={input} value={form.outletName} onChange={(e) => setForm((p) => ({ ...p, outletName: e.target.value }))}
+                  placeholder="Bandra West" />
+                <p style={{ fontSize: 12.5, color: "#888", margin: "-6px 0 14px" }}>
+                  You can add up to {tierLimits(tier).maxOutlets === Infinity ? "unlimited" : tierLimits(tier).maxOutlets} outlets once you are approved.
+                </p>
+              </>
+            )}
+
+            <label style={label}>Tagline</label>
+            <input style={input} value={form.tagline} onChange={(e) => setForm((p) => ({ ...p, tagline: e.target.value }))} placeholder="Authentic North Indian" />
+
+            <label style={label}>Address</label>
+            <input style={input} value={form.address} onChange={(e) => setForm((p) => ({ ...p, address: e.target.value }))} />
+
+            <label style={label}>Logo</label>
+            <input type="file" accept="image/*" onChange={(e) => handleLogoUpload(e.target.files?.[0])} style={{ ...input, padding: 10 }} />
+            {logoUploading && <p style={{ fontSize: 13, color: "#888", marginTop: -8 }}>Uploading…</p>}
+            {form.logoUrl && <img src={form.logoUrl} alt="" style={{ width: 64, height: 64, borderRadius: 12, objectFit: "cover", marginBottom: 14 }} />}
+
+            {error && <p style={{ color: "#b91c1c", fontSize: 13.5, marginBottom: 12 }}>{error}</p>}
+            <button style={primaryBtn} onClick={goToSignIn}>Continue</button>
+            <button style={ghostBtn} onClick={() => setStep("orgType")}>← Change type</button>
+          </>
+        )}
+
+        {/* ------------------------------------------------------ signin */}
+        {step === "signin" && (
+          <>
+            <h1 style={{ fontSize: 24, fontWeight: 800, color: "#1a1a2e", margin: "0 0 8px" }}>Create your owner account</h1>
+            <p style={{ color: "#6b6b7b", fontSize: 14.5, margin: "0 0 22px" }}>
+              This Google account becomes the owner of {form.brandName || "your brand"} — it controls billing,
+              outlets, and who else gets access.
+            </p>
+            {error && <p style={{ color: "#b91c1c", fontSize: 13.5, marginBottom: 12 }}>{error}</p>}
+            <button style={primaryBtn} onClick={handleGoogleSignIn} disabled={loading}>
+              {loading ? "Signing in…" : "Sign in with Google"}
+            </button>
+            <button style={ghostBtn} onClick={() => setStep("details")}>← Back</button>
+          </>
+        )}
+
+        {/* -------------------------------------------------------- plan */}
+        {step === "plan" && (
+          <>
+            <h1 style={{ fontSize: 24, fontWeight: 800, color: "#1a1a2e", margin: "0 0 20px" }}>Choose your plan</h1>
+            <div style={{ display: "grid", gap: 12, marginBottom: 20 }}>
+              {PLANS_FOR_TIER[tier].map((key) => {
+                const active = selectedPlan === key;
+                return (
+                  <button key={key} onClick={() => setSelectedPlan(key)}
+                    style={{ textAlign: "left", padding: 18, borderRadius: 14, cursor: "pointer", fontFamily: "inherit",
+                      border: active ? "2px solid #1a1a2e" : "1.5px solid #e6e1d6", background: active ? "#faf8f5" : "#fff" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <span style={{ fontSize: 17, fontWeight: 800, color: "#1a1a2e" }}>{PLAN_LABELS[key]}</span>
+                      <span style={{ fontSize: 15, fontWeight: 800, color: "#e8a33d" }}>{PLAN_PRICING[key].label}</span>
+                    </div>
+                    <div style={{ fontSize: 12.5, color: "#6b6b7b" }}>
+                      {Object.entries(PLAN_FEATURES[key]).filter(([, v]) => v === true).map(([k]) => FEATURE_LABELS[k]).filter(Boolean).join(" · ")}
+                    </div>
+                  </button>
                 );
               })}
             </div>
-            <button onClick={confirmPlan} style={{ width: "100%", padding: 16, borderRadius: 14, border: "none", background: "#e8a33d", color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer" }}>
-              Continue with {PLAN_LABELS[selectedPlan]} →
-            </button>
-          </div>
+            {tier === TIERS.MULTI && (
+              <p style={{ fontSize: 12.5, color: "#888", marginBottom: 16 }}>
+                Multi-outlet is billed per outlet. You will be invoiced for additional outlets as you add them.
+              </p>
+            )}
+            <button style={primaryBtn} onClick={() => setStep("payment")}>Continue to payment</button>
+          </>
         )}
 
+        {/* ----------------------------------------------------- payment */}
         {step === "payment" && (
-          <div style={{ background: "#fff", borderRadius: 20, padding: 28, boxShadow: "0 4px 20px rgba(0,0,0,0.06)" }}>
-            <h3 style={{ fontSize: 17, fontWeight: 800, marginBottom: 6 }}>Pay {PLAN_PRICING[selectedPlan].label}</h3>
-            <p style={{ fontSize: 13.5, color: "#6b6b7b", marginBottom: 20 }}>Pay via UPI, then enter your transaction reference below so we can confirm it.</p>
-            <div style={{ textAlign: "center", marginBottom: 20 }}>
-              <img
-                src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(`upi://pay?pa=${PLATFORM_UPI_ID}&pn=${encodeURIComponent(PLATFORM_PAYEE_NAME)}&am=${PLAN_PRICING[selectedPlan].amount}&cu=INR`)}`}
-                alt="Payment QR" style={{ width: 180, height: 180, margin: "0 auto", display: "block", borderRadius: 12 }}
-              />
-              <div style={{ fontSize: 13, color: "#6b6b7b", marginTop: 10 }}>UPI ID: <strong>{PLATFORM_UPI_ID}</strong></div>
-            </div>
-            <label style={labelStyle}>Transaction Reference / UTR Number *</label>
-            <input style={{ ...inputStyle, marginBottom: 20 }} placeholder="e.g. 425678901234" value={txnRef} onChange={(e) => setTxnRef(e.target.value)} />
-            <button onClick={submitPayment} disabled={loading} style={{ width: "100%", padding: 16, borderRadius: 14, border: "none", background: "#e8a33d", color: "#fff", fontSize: 16, fontWeight: 700, cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.6 : 1 }}>
-              {loading ? "Submitting..." : "I've Paid — Submit for Review"}
+          <>
+            <h1 style={{ fontSize: 24, fontWeight: 800, color: "#1a1a2e", margin: "0 0 8px" }}>
+              {isEnterprise ? "Request a call" : "Complete your payment"}
+            </h1>
+
+            {isEnterprise ? (
+              <p style={{ color: "#6b6b7b", fontSize: 14.5, lineHeight: 1.6, margin: "0 0 22px" }}>
+                Enterprise is priced per agreement. Submit your request and we will get in touch to
+                understand what you need — number of brands, outlets, and any integrations — before
+                anything is set up or charged.
+              </p>
+            ) : (
+              <>
+                <p style={{ color: "#6b6b7b", fontSize: 14.5, margin: "0 0 18px" }}>
+                  Pay <strong style={{ color: "#1a1a2e" }}>₹{PLAN_PRICING[selectedPlan].amount.toLocaleString("en-IN")}</strong> to
+                  the UPI ID below, then enter your transaction reference.
+                </p>
+                <div style={{ background: "#faf8f5", border: "1px solid #e6e1d6", borderRadius: 12, padding: 16, marginBottom: 18 }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 800, color: "#6b6b7b", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 4 }}>Pay to</div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: "#1a1a2e", fontFamily: "monospace" }}>{PLATFORM_UPI_ID}</div>
+                  <div style={{ fontSize: 13, color: "#6b6b7b", marginTop: 2 }}>{PLATFORM_PAYEE_NAME}</div>
+                </div>
+                <label style={label}>Transaction reference / UTR *</label>
+                <input style={input} value={txnRef} onChange={(e) => setTxnRef(e.target.value)} placeholder="e.g. 412345678901" />
+              </>
+            )}
+
+            {error && (
+              <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: 14, marginBottom: 14 }}>
+                <div style={{ fontSize: 13, color: "#b91c1c", fontFamily: "monospace", wordBreak: "break-word" }}>{error}</div>
+                {error.includes("permission-denied") && (
+                  <div style={{ fontSize: 12.5, color: "#b91c1c", marginTop: 8, lineHeight: 1.5 }}>
+                    The current security rules do not match this signup flow. Run
+                    <code> firebase deploy --only firestore:rules</code> and try again.
+                  </div>
+                )}
+              </div>
+            )}
+
+            <button style={primaryBtn} onClick={submitForApproval} disabled={loading}>
+              {loading ? "Submitting…" : "Submit for approval"}
             </button>
-          </div>
+          </>
         )}
 
+        {/* -------------------------------------------------------- done */}
         {step === "done" && (
-          <div style={{ background: "#fff", borderRadius: 20, padding: 32, textAlign: "center", boxShadow: "0 4px 20px rgba(0,0,0,0.06)" }}>
-            <div style={{ fontSize: 44, marginBottom: 16 }}>✅</div>
-            <h3 style={{ fontSize: 19, fontWeight: 800, marginBottom: 8 }}>Thanks — under review!</h3>
-            <p style={{ color: "#6b6b7b", fontSize: 14.5, lineHeight: 1.6, marginBottom: 20 }}>
-              We're verifying your payment. You'll get access shortly — usually within a few hours.
+          <div style={{ textAlign: "center" }}>
+            <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#f0fdf4", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px", fontSize: 30 }}>
+              ✅
+            </div>
+            <h1 style={{ fontSize: 24, fontWeight: 800, color: "#1a1a2e", margin: "0 0 10px" }}>
+              Sent for approval
+            </h1>
+            <p style={{ color: "#6b6b7b", fontSize: 14.5, lineHeight: 1.65, margin: "0 0 20px" }}>
+              Your request has gone to the Cabadra team.
+              {isEnterprise
+                ? " We'll reach out to discuss your setup, usually within one working day."
+                : " We'll confirm your payment and activate your account — usually within a few hours."}
+              <br /><br />
+              <strong style={{ color: "#1a1a2e" }}>You&rsquo;ll be able to sign in as soon as it&rsquo;s approved.</strong>
+              {" "}Nothing else is needed from you right now, and you can close this page.
             </p>
-            <button onClick={() => router.replace("/login")} style={{ padding: "12px 24px", borderRadius: 12, border: "none", background: "#1a1a2e", color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
-              Go to Login
-            </button>
+
+            <div style={{ background: "#faf8f5", border: "1px solid #e6e1d6", borderRadius: 12, padding: 16, textAlign: "left", marginBottom: 20 }}>
+              <div style={{ fontSize: 11.5, fontWeight: 800, color: "#6b6b7b", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>
+                Your request
+              </div>
+              <div style={{ fontSize: 13.5, color: "#1a1a2e", lineHeight: 1.7 }}>
+                <div><strong>{form.brandName}</strong> · {TIER_LABELS[tier]}</div>
+                {!isEnterprise && <div>{PLAN_LABELS[selectedPlan]} — ₹{PLAN_PRICING[selectedPlan].amount.toLocaleString("en-IN")}</div>}
+                {!isEnterprise && txnRef && <div style={{ fontFamily: "monospace", fontSize: 12.5, color: "#6b6b7b" }}>UTR {txnRef}</div>}
+                <div style={{ fontSize: 12, color: "#888", marginTop: 6 }}>{firebaseUser?.email}</div>
+              </div>
+            </div>
+
+            <button style={primaryBtn} onClick={() => router.replace("/pending")}>Check status</button>
           </div>
         )}
       </div>
