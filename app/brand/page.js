@@ -63,21 +63,37 @@ function BrandConsoleInner() {
   const load = useCallback(async () => {
     if (!brandId) return;
     const ids = outletKey ? outletKey.split(",") : [];
-    try {
-      // Nothing is set before the first await, so this cannot cascade renders.
-      const [o, t] = await Promise.all([fetchOutlets(ids), fetchBrandToday(ids)]);
-      const m = can(access, "editMasterMenu") ? await fetchMasterMenu(brandId) : [];
-      const inv = can(access, "inviteFloorStaff") ? await listInvites(brandId) : [];
-      setError("");
-      setOutlets(o);
-      setToday(t);
-      setMaster(m);
-      setInvites(inv);
-    } catch (e) {
-      setError(e?.code === "permission-denied"
-        ? "permission-denied — the latest security rules may not be deployed yet."
-        : e.message);
-    }
+
+    // Each section is loaded independently. One failed read used to blank the
+    // whole console and report a single vague message; now the parts that work
+    // still render and the banner names exactly what did not.
+    const failures = [];
+    const attempt = async (what, fn, fallback) => {
+      try {
+        return await fn();
+      } catch (e) {
+        failures.push(`${what} (${e?.code || e.message})`);
+        return fallback;
+      }
+    };
+
+    const [o, t, m, inv] = await Promise.all([
+      attempt("outlets", () => fetchOutlets(ids), []),
+      attempt("today's figures", () => fetchBrandToday(ids), null),
+      can(access, "editMasterMenu")
+        ? attempt("master menu", () => fetchMasterMenu(brandId), [])
+        : Promise.resolve([]),
+      can(access, "inviteFloorStaff")
+        ? attempt("invitations", () => listInvites(brandId), [])
+        : Promise.resolve([]),
+    ]);
+
+    setOutlets(o);
+    setToday(t);
+    setMaster(m);
+    setInvites(inv);
+    setError(failures.length === 0 ? "" :
+      `Could not load ${failures.join(", ")}. If these say permission-denied, deploy the latest rules: firebase deploy --only firestore:rules`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // Primitives only. `brand` is an object; putting it here makes the callback
     // a new identity whenever auth state refreshes, which re-runs the effect.

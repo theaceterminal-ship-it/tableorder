@@ -282,10 +282,15 @@ service cloud.firestore {
       // manage the brand may read the ones they issued. Scoping this to the
       // caller's own email means an invite list is not a harvestable directory
       // of every restaurant's staff.
+      // A person always reads the invitation addressed to them. Anyone with
+      // brand-level oversight reads the ones issued for their own brand, which
+      // is what makes the pending-invites list work for managers as well as
+      // owners. Scoping to the caller's own email means the collection is not a
+      // harvestable directory of every restaurant's staff.
       allow read: if isPlatformAdmin()
                   || (signedIn() && request.auth.token.email != null
                       && emailKey == request.auth.token.email.lower())
-                  || (signedIn() && resource != null && isBrandOwner(resource.data.brandId));
+                  || (signedIn() && canReadBrand(resource.data.brandId));
 
       allow create, update: if signedIn()
                             && request.resource.data.outletIds.size() > 0
