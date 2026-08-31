@@ -473,6 +473,9 @@ function ReceptionPage() {
   const [newStaffOutlets, setNewStaffOutlets] = useState([]); // outlet ids this invite grants
   const [pendingInvites, setPendingInvites] = useState([]);
   const [outlets, setOutlets] = useState([]); // every outlet in the brand this person can reach
+  // Stable primitive keys for effect dependencies — see the note below.
+  const brandOutletKey = (brand?.outletIds || []).join(",");
+  const accessOutletKey = access.outletIds.join(",");
   const [seeding, setSeeding] = useState(false);
   const [seedResult, setSeedResult] = useState(null);
   const [addingStaff, setAddingStaff] = useState(false);
@@ -503,10 +506,10 @@ function ReceptionPage() {
   }, []);
 
   useEffect(() => {
-    if (!brandId || !brand) { setOutlets([]); return; }
+    if (!brandId || !brandOutletKey) { setOutlets([]); return; }
     let cancelled = false;
     (async () => {
-      const ids = (brand.outletIds || []).filter((id) => access.allOutlets || access.outletIds.includes(id));
+      const ids = brandOutletKey.split(",").filter((id) => access.allOutlets || access.outletIds.includes(id));
       const loaded = await Promise.all(ids.map(async (id) => {
         try {
           const snap = await getDoc(doc(db, "restaurants", id));
@@ -519,7 +522,10 @@ function ReceptionPage() {
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [brandId, brand, access.allOutlets, access.outletIds.join(",")]);
+    // Depend ONLY on primitives. An object or array in a dependency list is a
+    // fresh reference on every render, which re-runs the effect, which sets
+    // state, which renders again — forever.
+  }, [brandId, brandOutletKey, access.allOutlets, accessOutletKey]);
 
   useEffect(() => {
     refreshInvites();

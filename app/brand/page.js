@@ -61,7 +61,7 @@ function BrandConsoleInner() {
   const roleKey = access.role;
 
   const load = useCallback(async () => {
-    if (!brandId || !brand) return;
+    if (!brandId) return;
     const ids = outletKey ? outletKey.split(",") : [];
     try {
       // Nothing is set before the first await, so this cannot cascade renders.
@@ -79,7 +79,9 @@ function BrandConsoleInner() {
         : e.message);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [brandId, brand, outletKey, roleKey]);
+    // Primitives only. `brand` is an object; putting it here makes the callback
+    // a new identity whenever auth state refreshes, which re-runs the effect.
+  }, [brandId, outletKey, roleKey]);
 
   useEffect(() => {
     load();
