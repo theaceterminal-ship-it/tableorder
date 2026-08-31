@@ -174,6 +174,21 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    // Legacy subscription documents from before brands existed.
+    //
+    // The rules rewrite dropped this collection entirely, which meant
+    // /setup/migrate could not read the subscription it is supposed to carry
+    // across: the read failed, the catch swallowed it, and a migrated account
+    // silently reverted to pending_approval — an active paying customer would
+    // have been locked out and sent back to the approvals queue.
+    //
+    // Read-only, and only by the account it belongs to. Nothing writes here any
+    // more; the collection can be deleted once every account has migrated.
+    match /hotels/{legacyId} {
+      allow read: if isPlatformAdmin() || (signedIn() && uid() == legacyId);
+      allow write: if false;
+    }
+
     match /orgs/{orgId} {
       allow read: if isPlatformAdmin()
                   || (signedIn() && resource.data.get('ownerUid', '') == uid());
