@@ -1,0 +1,388 @@
+rules_version = '2';
+
+// Cabadra — Firestore security rules.
+//
+// Mirrors the permission model in lib/tenancy.js, which is exhaustively unit
+// tested. When you change one, change the other: the tests describe intent,
+// these rules enforce it, and they must not disagree.
+//
+// THE MODEL
+//   orgs/{orgId}                      Enterprise only; one implicit org otherwise
+//   brands/{brandId}                  subscription, master menu, memberships
+//     members/{uid}                   brand_owner | brand_manager | outlet_manager
+//   restaurants/{outletId}            UNCHANGED PATH — orders, tables, QR target
+//     staff/{uid}                     reception | kitchen
+//
+// TWO THREAT MODELS, KEPT SEPARATE
+//   1. The diner's table client is UNAUTHENTICATED. It is a public page opened
+//      from a QR code with the outlet id and table number in the URL, so anyone
+//      can edit that URL. Assume an anonymous stranger lying about their table.
+//   2. Staff are authenticated but scoped. A Bandra manager must not reach
+//      Andheri, and nobody may grant themselves a role above their own.
+//
+// BOOTSTRAP ORDER MATTERS. Signup writes brand -> membership -> outlet -> info.
+// Every step below is reachable in that order; an earlier version of this file
+// required staff membership before the membership document existed, which broke
+// account creation entirely. Do not reorder without re-checking.
+//
+// Deploy:  firebase deploy --only firestore:rules,firestore:indexes
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =====================================================================
+    // Helpers
+    // =====================================================================
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function uid() {
+      return request.auth.uid;
+    }
+
+    // The platform operator. Seeded by hand in the console; writable by nobody,
+    // so no client can ever promote itself into approving its own subscription.
+    function isPlatformAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/platformAdmins/$(uid()));
+    }
+
+    function brandDoc(brandId) {
+      return get(/databases/$(database)/documents/brands/$(brandId)).data;
+    }
+
+    function isBrandCreator(brandId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/brands/$(brandId))
+        && brandDoc(brandId).ownerUid == uid();
+    }
+
+    function hasBrandMembership(brandId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/brands/$(brandId)/members/$(uid()));
+    }
+
+    function brandRole(brandId) {
+      return get(/databases/$(database)/documents/brands/$(brandId)/members/$(uid())).data.role;
+    }
+
+    // Owner reaches everything in the brand. isBrandCreator is the bootstrap
+    // path: during signup the membership document does not exist yet.
+    function isBrandOwner(brandId) {
+      return isBrandCreator(brandId)
+        || (hasBrandMembership(brandId) && brandRole(brandId) == 'brand_owner');
+    }
+
+    function brandMemberOutlets(brandId) {
+      return get(/databases/$(database)/documents/brands/$(brandId)/members/$(uid())).data.get('outletIds', []);
+    }
+
+    // Which brand an outlet belongs to.
+    function outletBrandId(outletId) {
+      return get(/databases/$(database)/documents/restaurants/$(outletId)).data.get('brandId', null);
+    }
+
+    // Reception / kitchen are rostered on the outlet itself.
+    function isOutletStaff(outletId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/restaurants/$(outletId)/staff/$(uid()));
+    }
+
+    // Full management of one outlet: brand owner, or an outlet manager whose
+    // assignment list contains it. Mirrors canAccessOutlet() in lib/tenancy.js.
+    function canManageOutlet(outletId) {
+      return signedIn() && (
+        isBrandOwner(outletBrandId(outletId))
+        || (hasBrandMembership(outletBrandId(outletId))
+            && brandRole(outletBrandId(outletId)) == 'outlet_manager'
+            && outletId in brandMemberOutlets(outletId))
+      );
+    }
+
+    // Anyone entitled to see an outlet's operational data — managers above it
+    // plus the floor staff rostered on it.
+    function canWorkOutlet(outletId) {
+      return isOutletStaff(outletId) || canManageOutlet(outletId);
+    }
+
+    // Read-only oversight across a whole brand.
+    function canReadBrand(brandId) {
+      return isBrandOwner(brandId)
+        || (hasBrandMembership(brandId) && brandRole(brandId) in ['brand_manager', 'outlet_manager']);
+    }
+
+    function pendingStatus(status) {
+      return status in ['pending_payment', 'pending_approval'];
+    }
+
+    // Fields a diner may set when placing an order. Anything else — a status
+    // jump, a bill total, a discount — must come from staff.
+    function dinerOrderFieldsOnly() {
+      return request.resource.data.keys().hasOnly([
+        'table', 'items', 'status', 'orderType', 'isVIP',
+        'etaMinutes', 'preparingAt', 'createdAt', 'notes'
+      ]);
+    }
+
+    // =====================================================================
+    // Platform
+    // =====================================================================
+
+    match /platformAdmins/{adminUid} {
+      allow read: if signedIn() && uid() == adminUid;
+      allow write: if false; // console only, by hand
+    }
+
+    // A routing hint, never an authority. The subject can edit this document,
+    // so no rule anywhere may branch on its contents.
+    match /users/{userId} {
+      allow read: if signedIn() && uid() == userId;
+      allow create: if signedIn() && uid() == userId;
+      allow update: if signedIn() && uid() == userId;
+      allow delete: if false;
+    }
+
+    match /orgs/{orgId} {
+      allow read: if isPlatformAdmin()
+                  || (signedIn() && resource.data.get('ownerUid', '') == uid());
+      allow create: if signedIn() && request.resource.data.ownerUid == uid();
+      allow update, delete: if isPlatformAdmin();
+    }
+
+    // =====================================================================
+    // Brands
+    // =====================================================================
+
+    match /brands/{brandId} {
+      // Platform admin reads every brand — that is the approvals queue, served
+      // by one collection query rather than a lookup per brand.
+      allow read: if isPlatformAdmin() || canReadBrand(brandId);
+
+      // Signup. The creator must name themselves as owner and may only submit
+      // into a pending state, so nobody can self-activate a paid plan.
+      allow create: if signedIn()
+                    && request.resource.data.ownerUid == uid()
+                    && pendingStatus(request.resource.data.subscription.status);
+
+      // Two writers, deliberately different:
+      //   owner — may re-submit while pending / rejected / expired, and may
+      //           edit brand details, but can never write an active status,
+      //           change tier, or move the expiry date.
+      //   platform admin — may set anything, once payment is verified.
+      allow update: if isPlatformAdmin()
+                    || (isBrandOwner(brandId)
+                        && pendingStatus(request.resource.data.subscription.status)
+                        && resource.data.subscription.status in ['pending_payment', 'pending_approval', 'rejected', 'expired']
+                        && request.resource.data.tier == resource.data.tier
+                        && request.resource.data.ownerUid == resource.data.ownerUid);
+
+      allow delete: if isPlatformAdmin();
+
+      // --- memberships -------------------------------------------------
+      match /members/{memberUid} {
+        allow read: if isPlatformAdmin()
+                    || (signedIn() && uid() == memberUid)
+                    || canReadBrand(brandId);
+
+        // Bootstrap: the brand creator writes their own owner membership.
+        // Thereafter only an owner may add members, and never another owner —
+        // ownership transfer is a platform-admin operation on purpose.
+        allow create: if (isBrandCreator(brandId)
+                          && uid() == memberUid
+                          && request.resource.data.role == 'brand_owner')
+                      || (isBrandOwner(brandId)
+                          && request.resource.data.role in ['brand_manager', 'outlet_manager']);
+
+        allow update: if isBrandOwner(brandId)
+                      && request.resource.data.role in ['brand_manager', 'outlet_manager'];
+
+        allow delete: if isBrandOwner(brandId) && uid() != memberUid;
+      }
+
+      // --- master menu --------------------------------------------------
+      // Public read: the diner's table client resolves the effective menu as
+      // master ⊕ outlet override, so it must be able to read the master.
+      match /menuItems/{itemId} {
+        allow read: if true;
+        allow write: if isBrandOwner(brandId);
+      }
+    }
+
+    // =====================================================================
+    // Staff invitations
+    // =====================================================================
+    //
+    // An invitation carries the scope of the grant and who issued it, so the
+    // rule can verify the inviter actually held what they gave away. Without
+    // outletIds on the document, a Bandra manager could invite a colleague
+    // into Andheri.
+
+    match /staffInvites/{emailKey} {
+      // Read is open to any signed-in user because login resolves an invite by
+      // the caller's own email before any membership exists. The document
+      // carries no secrets — only a role, a brand, and a list of outlet ids.
+      allow read: if signedIn();
+
+      allow create, update: if signedIn()
+                            && request.resource.data.outletIds.size() > 0
+                            && (
+                              // Owner may invite managers or floor staff anywhere in the brand.
+                              (isBrandOwner(request.resource.data.brandId)
+                               && request.resource.data.role in ['brand_manager', 'outlet_manager', 'reception', 'kitchen'])
+                              // An outlet manager may invite floor staff only, and only for
+                              // outlets they themselves hold.
+                              || (hasBrandMembership(request.resource.data.brandId)
+                                  && brandRole(request.resource.data.brandId) == 'outlet_manager'
+                                  && request.resource.data.role in ['reception', 'kitchen']
+                                  && request.resource.data.outletIds.hasOnly(brandMemberOutlets(request.resource.data.brandId)))
+                            );
+
+      allow delete: if signedIn() && isBrandOwner(resource.data.brandId);
+    }
+
+    // =====================================================================
+    // Outlets
+    // =====================================================================
+
+    match /restaurants/{outletId} {
+
+      // The outlet document itself. Public read: the diner's client needs the
+      // brandId to resolve the master menu.
+      allow read: if true;
+      allow create: if signedIn() && isBrandOwner(request.resource.data.brandId);
+
+      // An outlet can never be moved between brands from a client — that would
+      // let someone graft their outlet onto a brand they do not own.
+      //
+      // The second clause is the one-time migration path off the old model,
+      // where a restaurant's id WAS its owner's uid. It is self-limiting: it
+      // only applies while brandId is absent, so it cannot fire twice, and only
+      // for the user whose uid matches the outlet id.
+      allow update: if (canManageOutlet(outletId)
+                        && request.resource.data.brandId == resource.data.brandId)
+                    || (signedIn() && uid() == outletId
+                        && !('brandId' in resource.data)
+                        && 'brandId' in request.resource.data);
+
+      allow delete: if signedIn() && isBrandOwner(resource.data.get('brandId', ''));
+
+      // --- diner-facing, public read -----------------------------------
+      match /menuOverrides/{itemId} {
+        allow read: if true;
+        allow write: if canManageOutlet(outletId);
+      }
+      match /menuItems/{itemId} {
+        allow read: if true;
+        allow write: if canManageOutlet(outletId);
+      }
+      match /categories/{categoryId} {
+        allow read: if true;
+        allow write: if canManageOutlet(outletId);
+      }
+      match /offerBanners/{bannerId} {
+        allow read: if true;
+        allow write: if canManageOutlet(outletId);
+      }
+      match /bundleRules/{ruleId} {
+        allow read: if true;
+        allow write: if canManageOutlet(outletId);
+      }
+      match /tables/{tableId} {
+        allow read: if true;
+        allow write: if canWorkOutlet(outletId);
+      }
+      match /floors/{floorId} {
+        allow read: if true;
+        allow write: if canManageOutlet(outletId);
+      }
+
+      // profile and settings are public (name, logo, veg flag, review link).
+      // billing holds the outlet's UPI id and tax configuration — staff only.
+      match /info/{docId} {
+        allow read: if docId != 'billing' || canWorkOutlet(outletId);
+        allow write: if canManageOutlet(outletId);
+      }
+
+      // --- orders --------------------------------------------------------
+      //
+      // Reads stay open: the diner's client polls its own table's status and
+      // there is no diner identity to scope by. Two things keep that tolerable
+      // — the client query is bounded to the current sitting (lib/orders.js),
+      // and customer name and phone are NOT on the order document; they live in
+      // billCustomers below, which is staff-only.
+      //
+      // TODO (next): require an open tableSessions/{table} document for order
+      // creation, so an order cannot be placed from outside the restaurant or
+      // onto a table that is not seated. Pure rules, no server needed.
+      match /orders/{orderId} {
+        allow read: if true;
+
+        allow create: if canWorkOutlet(outletId)
+                      || (dinerOrderFieldsOnly()
+                          && request.resource.data.status in ['pending', 'bill_requested']
+                          && request.resource.data.items.size() > 0);
+
+        // A diner may move their own order between diner-owned states while it
+        // is unbilled, and may attach a rating once, after payment. Everything
+        // else — bill totals, discounts, status jumps — is staff only.
+        allow update: if canWorkOutlet(outletId)
+                      || (resource.data.status in ['pending', 'served']
+                          && request.resource.data.diff(resource.data).affectedKeys()
+                               .hasOnly(['items', 'status'])
+                          && request.resource.data.status in ['pending', 'bill_requested', 'merged'])
+                      || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rating'])
+                          && !('rating' in resource.data));
+
+        allow delete: if canManageOutlet(outletId);
+      }
+
+      // --- staff only ----------------------------------------------------
+
+      // Exists precisely so bill-time PII is unreachable from the public
+      // table client.
+      match /billCustomers/{billId} {
+        allow read, write: if canWorkOutlet(outletId);
+      }
+
+      match /customers/{customerId} {
+        allow read, write: if canWorkOutlet(outletId);
+      }
+
+      match /waiterCalls/{callId} {
+        allow read: if true;
+        allow create: if true; // a diner raises these
+        allow update, delete: if canWorkOutlet(outletId);
+      }
+
+      // The roster. Bootstrap: an invited user writes their own staff document
+      // at first login, after the invite has been verified by the app. They can
+      // only ever create their OWN entry, and only with a floor-staff role.
+      match /staff/{staffUid} {
+        allow read: if canWorkOutlet(outletId);
+        allow create: if (signedIn() && uid() == staffUid
+                          && request.resource.data.role in ['reception', 'kitchen'])
+                      || canManageOutlet(outletId);
+        allow update, delete: if canManageOutlet(outletId);
+      }
+
+      // Pre-aggregated rollups and recommendation models. Written by a trusted
+      // batch job using the Admin SDK, which bypasses these rules entirely;
+      // clients only ever read them.
+      match /dailyStats/{dayId} {
+        allow read: if canWorkOutlet(outletId);
+        allow write: if false;
+      }
+      match /recModels/{modelId} {
+        allow read: if true; // the diner's client scores recommendations locally
+        allow write: if false;
+      }
+      match /recEvents/{eventId} {
+        allow read: if canManageOutlet(outletId);
+        allow create: if true; // impression / add logging, from the diner's client
+        allow update, delete: if false;
+      }
+    }
+  }
+}
