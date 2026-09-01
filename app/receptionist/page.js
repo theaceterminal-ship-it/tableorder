@@ -23,7 +23,7 @@ import { computeBundleDiscounts, computeBillTotals } from "@/lib/pricing";
 import { can } from "@/lib/tenancy";
 import { fetchMasterMenu, seedOutletFromMaster } from "@/lib/brand";
 import {
-  parseCSV, parseCSVLine, truthy, cleanPrice,
+  parseCSV, parseCSVLine, truthy, cleanPrice, parseImportRows, matchImageFile,
   normalizeFoodType as normalizeFoodTypeShared,
 } from "@/lib/menu-import";
 import {
@@ -1471,68 +1471,17 @@ function ReceptionPage() {
   const normalizeBool = truthy;
   const normalizeFoodType = (val) => normalizeFoodTypeShared(val, siteSettings.pureVeg);
 
+  // Parsing lives in lib/menu-import.js with 13 tests: a missing category is
+  // reported rather than defaulted, the failing row is named so the operator can
+  // find it in their spreadsheet, and Pure Veg overrides whatever the file says.
   function parseImportData(text, format) {
-    let rows = [];
-    try {
-      if (format === "json") {
-        const parsed = JSON.parse(text);
-        rows = Array.isArray(parsed) ? parsed : [parsed];
-      } else {
-        rows = parseCSV(text);
-      }
-    } catch (e) {
-      return { error: "Invalid format. Check your CSV/JSON syntax." };
-    }
-
-    const items = [];
-    const errors = [];
-    rows.forEach((row, idx) => {
-      const name = row.name || row.Name || row.item || row.Item || "";
-      const priceRaw = row.price || row.Price || row.price_inr || "";
-      const category = row.category || row.Category || "";
-      const description = row.description || row.Description || row.desc || "";
-      const foodTypeRaw = row.foodtype || row.foodType || row.food_type || row.type || "veg";
-      const chefSpecialRaw = row.chefspecial || row.chefSpecial || row.chef_special || row.chef || "no";
-      const featuredRaw = row.featured || row.Featured || "no";
-      const imageUrl = row.imageurl || row.imageUrl || row.image_url || row.image || "";
-      const imageFileRaw = row.imagefile || row.imageFile || row.image_file || "";
-
-      const price = cleanPrice(priceRaw);
-      if (!name.trim()) { errors.push(`Row ${idx + 1}: Name is required`); return; }
-      if (price === null) { errors.push(`Row ${idx + 1}: Valid price is required (got "${priceRaw}")`); return; }
-      if (!category.trim()) { errors.push(`Row ${idx + 1}: Category is required`); return; }
-
-      items.push({
-        name: name.trim(),
-        price,
-        category: category.trim(),
-        description: description.trim(),
-        foodType: normalizeFoodType(foodTypeRaw),
-        chefSpecial: normalizeBool(chefSpecialRaw),
-        featured: normalizeBool(featuredRaw),
-        imageUrl: imageUrl.trim(),
-        imageFile: imageFileRaw.trim(),
-        isCombo: false,
-        available: true,
-      });
-    });
-
-    return { items, errors };
+    return parseImportRows(text, format, { pureVeg: siteSettings.pureVeg });
   }
 
   // === NEW: ZIP (CSV + photos) helpers ===
   // Matches an item's ImageFile value (from the CSV) to a file inside the zip's
   // images/ folder — case-insensitive, and falls back to matching by filename
   // with the extension ignored (so "dosa.jpg" in the CSV still matches "dosa.png").
-  function matchImageFile(filename, imagesMap) {
-    if (!filename) return null;
-    const base = filename.split("/").pop().toLowerCase().trim();
-    if (imagesMap[base]) return imagesMap[base];
-    const baseNoExt = base.replace(/\.[a-z0-9]+$/i, "");
-    const foundKey = Object.keys(imagesMap).find((k) => k.replace(/\.[a-z0-9]+$/i, "") === baseNoExt);
-    return foundKey ? imagesMap[foundKey] : null;
-  }
-
   // Unzips the uploaded file, locates the first .csv inside it, and collects
   // every image file into a flat { filename: JSZipObject } map (regardless of
   // which subfolder it's actually in, so "images/x.jpg" is keyed just as "x.jpg").
