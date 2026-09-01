@@ -181,6 +181,35 @@ service cloud.firestore {
         || (tableTokenMatches(outletId) && tableSessionOpen(outletId));
     }
 
+    function isDeliveryOrder() {
+      return request.resource.data.get('orderType', '') == 'delivery';
+    }
+
+    // -------------------------------------------------------------------
+    // Delivery
+    // -------------------------------------------------------------------
+    //
+    // Delivery is the LEGITIMATE way to order without being in the restaurant.
+    // It therefore cannot require a table token, which makes it the one path a
+    // stranger can write to — so it carries its own conditions instead.
+    //
+    // The details document is written first, under the order's own id, and the
+    // order is only accepted if it exists. That is what stops an order arriving
+    // with nowhere to deliver it.
+
+    function deliveryEnabled(outletId) {
+      return exists(/databases/$(database)/documents/restaurants/$(outletId)/info/settings)
+        && get(/databases/$(database)/documents/restaurants/$(outletId)/info/settings).data.get('deliveryEnabled', false) == true;
+    }
+
+    function hasDeliveryDetails(outletId, orderId) {
+      return exists(/databases/$(database)/documents/restaurants/$(outletId)/deliveryDetails/$(orderId));
+    }
+
+    function dinerMayOrderForDelivery(outletId, orderId) {
+      return deliveryEnabled(outletId) && hasDeliveryDetails(outletId, orderId);
+    }
+
     function pendingStatus(status) {
       return status in ['pending_payment', 'pending_approval'];
     }
@@ -479,7 +508,9 @@ service cloud.firestore {
                       || (dinerOrderFieldsOnly()
                           && request.resource.data.status in ['pending', 'bill_requested']
                           && request.resource.data.items.size() > 0
-                          && dinerMayOrderAt(outletId));
+                          && (isDeliveryOrder()
+                              ? dinerMayOrderForDelivery(outletId, orderId)
+                              : dinerMayOrderAt(outletId)));
 
         // A diner may move their own order between diner-owned states while it
         // is unbilled, and may attach a rating once, after payment. Everything
@@ -493,6 +524,22 @@ service cloud.firestore {
                           && !('rating' in resource.data));
 
         allow delete: if canManageOutlet(outletId);
+      }
+
+      // Where a delivery order is going.
+      //
+      // Kept off the order document deliberately. Orders are publicly readable
+      // so a diner can track their own, and if the address and phone lived
+      // there, every guessed order id would be a lookup for somebody's home
+      // address. Written once by the customer, read only by the outlet's staff,
+      // and never rewritable — otherwise an address could be changed after the
+      // kitchen had already started.
+      match /deliveryDetails/{orderId} {
+        allow read: if canWorkOutlet(outletId);
+        allow create: if request.resource.data.get('name', '') != ''
+                      && request.resource.data.get('phone', '') != ''
+                      && request.resource.data.get('address', '') != '';
+        allow update, delete: if canWorkOutlet(outletId);
       }
 
       // The token behind each table's QR code.
