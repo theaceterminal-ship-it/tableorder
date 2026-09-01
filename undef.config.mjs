@@ -14,6 +14,7 @@ export default [
         URL: "readonly", FileReader: "readonly", File: "readonly", localStorage: "readonly",
         navigator: "readonly", indexedDB: "readonly", process: "readonly", Notification: "readonly",
         AbortController: "readonly", structuredClone: "readonly", FormData: "readonly",
+        crypto: "readonly", URLSearchParams: "readonly", TextEncoder: "readonly", TextDecoder: "readonly",
       },
     },
     // The project's eslint-disable comments reference rules that only exist in

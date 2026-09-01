@@ -133,6 +133,54 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/staffInvites/$(request.auth.token.email.lower())).data;
     }
 
+    // -------------------------------------------------------------------
+    // Table sessions
+    // -------------------------------------------------------------------
+    //
+    // A QR code encodes ?restaurant=<outletId>&table=3. Both are guessable, so
+    // an order could be placed from anywhere, or onto somebody else's table by
+    // changing one digit.
+    //
+    // tableSecrets/{table} holds a random token that NO client can read — the
+    // rule reads it with get(), which the client cannot do. The token travels
+    // in the QR code and comes back on the order, so the diner proves they know
+    // it without ever being able to look it up.
+    //
+    // Protection turns on PER TABLE, the moment a secret exists for it. That
+    // makes this a migration rather than a flag day: a table is protected as
+    // soon as its new QR code is printed, and tables still showing an old code
+    // keep working until they are reprinted.
+
+    function tableKey() {
+      return string(request.resource.data.table);
+    }
+
+    function tableIsProtected(outletId) {
+      return exists(/databases/$(database)/documents/restaurants/$(outletId)/tableSecrets/$(tableKey()));
+    }
+
+    function tableTokenMatches(outletId) {
+      return request.resource.data.get('tableToken', '') != ''
+        && get(/databases/$(database)/documents/restaurants/$(outletId)/tableSecrets/$(tableKey())).data.token
+           == request.resource.data.tableToken;
+    }
+
+    // An open, unexpired session. This is what stops an order arriving for a
+    // table nobody is sitting at, or hours after the guests left.
+    function tableSessionOpen(outletId) {
+      return exists(/databases/$(database)/documents/restaurants/$(outletId)/tableSessions/$(tableKey()))
+        && get(/databases/$(database)/documents/restaurants/$(outletId)/tableSessions/$(tableKey())).data.open == true
+        && get(/databases/$(database)/documents/restaurants/$(outletId)/tableSessions/$(tableKey())).data.get('expiresAt', 0)
+           > request.time.toMillis();
+    }
+
+    // A diner may place this order: either the table is not yet protected (its
+    // QR has not been reprinted), or they hold its token AND it is seated.
+    function dinerMayOrderAt(outletId) {
+      return !tableIsProtected(outletId)
+        || (tableTokenMatches(outletId) && tableSessionOpen(outletId));
+    }
+
     function pendingStatus(status) {
       return status in ['pending_payment', 'pending_approval'];
     }
@@ -142,7 +190,7 @@ service cloud.firestore {
     function dinerOrderFieldsOnly() {
       return request.resource.data.keys().hasOnly([
         'table', 'items', 'status', 'orderType', 'isVIP',
-        'etaMinutes', 'preparingAt', 'createdAt', 'notes'
+        'etaMinutes', 'preparingAt', 'createdAt', 'notes', 'tableToken'
       ]);
     }
 
@@ -430,7 +478,8 @@ service cloud.firestore {
         allow create: if canWorkOutlet(outletId)
                       || (dinerOrderFieldsOnly()
                           && request.resource.data.status in ['pending', 'bill_requested']
-                          && request.resource.data.items.size() > 0);
+                          && request.resource.data.items.size() > 0
+                          && dinerMayOrderAt(outletId));
 
         // A diner may move their own order between diner-owned states while it
         // is unbilled, and may attach a rating once, after payment. Everything
@@ -444,6 +493,28 @@ service cloud.firestore {
                           && !('rating' in resource.data));
 
         allow delete: if canManageOutlet(outletId);
+      }
+
+      // The token behind each table's QR code.
+      //
+      // READ BY NOBODY. Not the diner, not the restaurant's own staff. A rule
+      // can still read it with get(), which is the entire mechanism: the client
+      // proves it knows the token without being able to look it up. Staff write
+      // these when generating QR codes; nothing ever reads them back.
+      match /tableSecrets/{tableNo} {
+        allow read: if false;
+        allow write: if canWorkOutlet(outletId);
+      }
+
+      // Whether a table is currently seated and taking orders.
+      //
+      // Deliberately readable: it holds nothing secret, and a diner whose order
+      // is refused deserves to be told their table is closed rather than shown
+      // a bare error. Only staff can open, extend or close one — a diner able
+      // to open their own session would defeat the point of requiring one.
+      match /tableSessions/{tableNo} {
+        allow read: if true;
+        allow write: if canWorkOutlet(outletId);
       }
 
       // --- staff only ----------------------------------------------------
