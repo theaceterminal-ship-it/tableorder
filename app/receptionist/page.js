@@ -3,6 +3,7 @@
 
 import { useEffect, useState, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
+import CrmSection from "./sections/CrmSection";
 import {
   useOrders, useMenuItems, useCategories, useTables, useFloors,
   useOfferBanners, useBundleRules, useWaiterCalls, useCustomers,
@@ -2079,24 +2080,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
   }
 
   // === NEW: CRM export ===
-  function exportCRMCSV() {
-    const rows = [
-      ["CRM Report", profile?.name || "", new Date().toLocaleDateString()], [],
-      ["Name", "Phone", "Orders", "Total Spent", "First Seen", "Last Seen", "Type"],
-      ...customers.map((c) => [
-        c.name || "", c.phone || "", c.orderCount || 0, c.totalSpent || 0,
-        c.firstSeen ? new Date(c.firstSeen).toLocaleDateString() : "",
-        c.lastSeen ? new Date(c.lastSeen).toLocaleDateString() : "",
-        (c.orderCount || 0) > 1 ? "Repeat" : "New",
-      ]),
-    ];
-    const csv = rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `crm-report-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
-    URL.revokeObjectURL(url);
-  }
+
 
   function renderAnalyticsFilterBar() {
     const opts = [["today", "Today"], ["3days", "Last 3 Days"], ["week", "Last Week"], ["month", "Last Month"]];
@@ -2248,104 +2232,10 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
   }
 
   // === NEW: RENDER CRM ===
-  const renderCRM = () => {
-    const repeatCustomers = customers.filter((c) => (c.orderCount || 0) > 1);
-    const newToday = customers.filter((c) => c.firstSeen && isToday(c.firstSeen));
-    const sorted = [...customers].sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
-    return (
-      <div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
-          <div>
-            <h2 style={{ fontSize: 24, fontWeight: 800, margin: 0, fontFamily: "'Fraunces', serif" }}>Customers (CRM)</h2>
-            <p style={{ fontSize: 13, color: "var(--text-secondary, #6b6b7b)", margin: "4px 0 0" }}>Built automatically from names/phones entered while generating bills.</p>
-          </div>
-          <button className="btn btn-primary" onClick={exportCRMCSV} disabled={customers.length === 0}>⬇ Export CRM Report</button>
-        </div>
+  const renderCRM = () => (
+    <CrmSection customers={customers} restaurantName={profile?.name || ""} />
+  );
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 14, marginBottom: 24 }}>
-          <StatCard label="Total Customers" value={customers.length} color="#3b82f6" />
-          <StatCard label="Repeat Customers" value={repeatCustomers.length} color="#16a34a" sub={customers.length ? `${Math.round((repeatCustomers.length / customers.length) * 100)}% of total` : undefined} />
-          <StatCard label="New Today" value={newToday.length} color="#e8a33d" />
-        </div>
-
-        <div className="card" style={{ borderRadius: 18, overflow: "hidden" }}>
-          {sorted.length === 0 ? (
-            <div style={{ padding: 44, textAlign: "center", color: "var(--text-secondary, #6b6b7b)" }}>
-              <div style={{ fontSize: 38, marginBottom: 10 }}>👥</div>
-              <p style={{ margin: 0, fontSize: 14 }}>No customers tracked yet. Add a name or phone when generating a bill to start building your CRM.</p>
-            </div>
-          ) : (
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                <thead>
-                  <tr style={{ borderBottom: "1px solid var(--border, #e6e1d6)", textAlign: "left", background: "var(--surface-2, #f3efe6)" }}>
-                    <th style={{ padding: "10px 14px" }}>Name</th>
-                    <th style={{ padding: "10px 14px" }}>Phone</th>
-                    <th style={{ padding: "10px 14px" }}>Orders</th>
-                    <th style={{ padding: "10px 14px" }}>Total Spent</th>
-                    <th style={{ padding: "10px 14px" }}>Last Visit</th>
-                    <th style={{ padding: "10px 14px" }}>Type</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sorted.map((c) => (
-                    <tr key={c.id} style={{ borderBottom: "1px solid #f4f4f4" }}>
-                      <td style={{ padding: "10px 14px", fontWeight: 600 }}>{c.name || "—"}</td>
-                      <td style={{ padding: "10px 14px" }}>{c.phone || "—"}</td>
-                      <td style={{ padding: "10px 14px" }}>{c.orderCount || 0}</td>
-                      <td style={{ padding: "10px 14px", fontWeight: 700 }}>₹{(c.totalSpent || 0).toLocaleString()}</td>
-                      <td style={{ padding: "10px 14px", color: "#888" }}>{c.lastSeen ? new Date(c.lastSeen).toLocaleDateString() : "-"}</td>
-                      <td style={{ padding: "10px 14px" }}>
-                        {(c.orderCount || 0) > 1 ? <span className="badge" style={{ background: "#dcfce7", color: "#166534" }}>Repeat</span> : <span className="badge">New</span>}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  // === NEW: Waiter Calls panel (Dashboard) ===
-  function renderWaiterCallsPanel() {
-    if (waiterCalls.length === 0) return null;
-    return (
-      <div className="card" style={{ borderRadius: 18, overflow: "hidden", marginBottom: 20 }}>
-        <div style={{ padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid var(--border, #e6e1d6)" }}>
-          <h3 style={{ fontSize: 15, fontWeight: 800, margin: 0 }}>🛎️ Waiter Calls</h3>
-          {pendingWaiterCalls.length > 0 && <span style={{ background: "#dc2626", color: "#fff", fontSize: 11, fontWeight: 800, padding: "2px 9px", borderRadius: 100 }}>{pendingWaiterCalls.length} pending</span>}
-        </div>
-        <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 8 }}>
-          {waiterCalls.slice(0, 8).map((c) => {
-            const reason = WAITER_REASONS.find((r) => r.label === c.reason) || { icon: "✋", label: c.reason };
-            return (
-              <div key={c.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderRadius: 10, background: c.status === "pending" ? "#fef2f2" : "var(--surface-2, #f3efe6)" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span style={{ fontSize: 18 }}>{reason.icon}</span>
-                  <div>
-                    <div style={{ fontWeight: 700, fontSize: 13.5 }}>Table {c.table} — {reason.label}</div>
-                    <div style={{ fontSize: 11, color: "#888" }}>{new Date(c.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
-                  </div>
-                </div>
-                {c.status === "pending" ? (
-                  <button className="btn btn-sm btn-primary" onClick={() => acknowledgeWaiterCall(c.id)}>Acknowledge</button>
-                ) : (
-                  <button className="btn btn-sm btn-ghost" onClick={() => dismissWaiterCall(c.id)}>Dismiss</button>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    );
-  }
-
-  // A read-only mirror of the kitchen board. Deliberately read-only: cooking
-  // times are the kitchen's call, and two people advancing the same ticket from
-  // two screens is how orders get marked ready before they are.
   // Runs a batch of kitchen transitions and surfaces the first real failure.
   // A transition that returns false lost a race to another screen, which is a
   // normal outcome and not worth telling anyone about.
