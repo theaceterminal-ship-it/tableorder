@@ -67,11 +67,10 @@ edited by anybody.
 least once during development and found by a human clicking through the app —
 including failures that locked staff out of their own restaurant mid-service.
 
-Requires Java (the Firestore emulator is a JVM process):
-
-```bash
-winget install --id Microsoft.OpenJDK.21 -e
-```
+The emulator runs on the JVM, so Java is required. The script locates an
+installed JDK itself, so it works even in a terminal that was already open when
+Java was installed — no PATH setup, no restarting your shell. If none is found
+it prints the install command for your platform.
 
 ## Deploying Firestore rules and indexes
 

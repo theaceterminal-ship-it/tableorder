@@ -9,7 +9,7 @@
     "lint": "eslint",
     "test": "vitest run --exclude \"**/rules/**\" --exclude \"**/node_modules/**\"",
     "test:watch": "vitest",
-    "test:rules": "firebase emulators:exec --only firestore \"vitest run rules/\""
+    "test:rules": "node scripts/test-rules.mjs"
   },
   "dependencies": {
     "firebase": "^12.16.0",
