@@ -334,6 +334,19 @@ service cloud.firestore {
                                   && request.resource.data.outletIds.hasOnly(brandMemberOutlets(request.resource.data.brandId)))
                             );
 
+      // The invitee marks their OWN invitation consumed once they have accepted
+      // it. They may flip active from true to false and stamp who and when --
+      // nothing else. Without this the invitation stays listed as outstanding
+      // forever, and the person appears simultaneously as a member and as
+      // somebody who has not signed in yet.
+      allow update: if signedIn()
+                    && request.auth.token.email != null
+                    && emailKey == request.auth.token.email.lower()
+                    && resource.data.active == true
+                    && request.resource.data.active == false
+                    && request.resource.data.diff(resource.data).affectedKeys()
+                         .hasOnly(['active', 'acceptedAt', 'acceptedByUid']);
+
       allow delete: if signedIn() && isBrandOwner(resource.data.brandId);
     }
 

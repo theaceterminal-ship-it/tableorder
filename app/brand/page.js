@@ -161,6 +161,15 @@ function BrandConsoleInner() {
   // here means the picker can never offer a grant the rules would reject.
   const grantableRoles = INVITABLE_ROLES.filter((r) => canInvite(access, r.role, visibleOutletIds));
 
+  // Somebody who has already joined is not "invited, not yet signed in", even
+  // if their invitation document still says active. Accepting marks the invite
+  // consumed, but that write is deliberately non-fatal, so this cross-check
+  // against the actual roster is what keeps the list honest either way.
+  const joinedEmails = new Set(
+    [...members, ...staff].map((m) => (m.email || "").trim().toLowerCase()).filter(Boolean)
+  );
+  const outstandingInvites = invites.filter((i) => !joinedEmails.has((i.email || "").toLowerCase()));
+
   const limits = tierLimits(brand.tier);
   const atCeiling = !canAddOutlet(brand.tier, (brand.outletIds || []).length);
   const sub = brand.subscription || {};
@@ -525,7 +534,8 @@ function BrandConsoleInner() {
                     const chosen = inviteForm.outletIds.length > 0 ? inviteForm.outletIds : visibleOutletIds;
                     const role = inviteForm.role || grantableRoles[0]?.role;
                     if (!email) { setInviteError("Email is required"); return; }
-                    if (invites.some((i) => i.email === email)) { setInviteError("That email already has an invitation."); return; }
+                    if (joinedEmails.has(email)) { setInviteError("That person is already on your team."); return; }
+                    if (outstandingInvites.some((i) => i.email === email)) { setInviteError("That email already has an invitation waiting."); return; }
                     if (!canInvite(access, role, chosen)) { setInviteError("You cannot grant that role for those outlets."); return; }
                     await createInvite({ email, role, brandId, outletIds: chosen, invitedByUid: user.uid });
                     setInviteForm({ email: "", role: "", outletIds: [] });
@@ -614,9 +624,9 @@ function BrandConsoleInner() {
 
             <div style={card}>
               <h3 style={{ fontSize: 14.5, fontWeight: 800, margin: "0 0 12px" }}>Invited, not yet signed in</h3>
-              {invites.length === 0 ? (
+              {outstandingInvites.length === 0 ? (
                 <p style={{ color: "#888", fontSize: 14 }}>No outstanding invitations.</p>
-              ) : invites.map((i) => (
+              ) : outstandingInvites.map((i) => (
                 <div key={i.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 10, marginBottom: 8 }}>
                   <div>
                     <div style={{ fontWeight: 600, fontSize: 13.5 }}>{i.email}</div>
