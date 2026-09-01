@@ -17,6 +17,13 @@ import { computeBundleDiscounts, computeBillTotals } from "@/lib/pricing";
 import { can } from "@/lib/tenancy";
 import { fetchMasterMenu, seedOutletFromMaster } from "@/lib/brand";
 import {
+  parseCSV, parseCSVLine, truthy, cleanPrice,
+  normalizeFoodType as normalizeFoodTypeShared,
+} from "@/lib/menu-import";
+import {
+  computeAnalytics as computeAnalyticsPure, buildTodayReport, filterLabel,
+} from "@/lib/analytics";
+import {
   startCooking as kdsStart, markReady as kdsReady, adjustEta as kdsAdjustEta,
   returnToQueue as kdsReturn, autoStartNext, ETA_PRESETS, DEFAULT_ETA,
   MAX_CONCURRENT_PREPARING,
@@ -1535,71 +1542,11 @@ function ReceptionPage() {
 
 
   // === BULK IMPORT FUNCTIONS ===
-  function normalizeBool(val) {
-    if (val === undefined || val === null) return false;
-    const s = String(val).toLowerCase().trim();
-    return s === "true" || s === "yes" || s === "1" || s === "y";
-  }
-  function normalizeFoodType(val) {
-    if (siteSettings.pureVeg) return "veg"; // Pure Veg restaurants never get a non-veg item in, no matter what the import file says
-    if (!val) return "veg";
-    const s = String(val).toLowerCase().trim();
-    if (s.includes("non")) return "nonveg";
-    return "veg";
-  }
-  function cleanPrice(val) {
-    if (val === undefined || val === null || val === "") return null;
-    // Strip everything except digits and a decimal point (handles ₹, $, commas,
-    // thousands separators, stray spaces, "/-" suffixes, etc. all in one go).
-    const s = String(val).replace(/[^0-9.]/g, "");
-    if (!s) return null;
-    const n = parseFloat(s);
-    return isNaN(n) || n <= 0 ? null : n;
-  }
-
-  // Quote-aware CSV line splitter — handles commas and double-quotes inside
-  // quoted fields (e.g. a Description or Name that itself contains a comma),
-  // which a plain .split(",") would silently break and misalign every column
-  // after it (this was the root cause of "invalid price" on otherwise-valid rows).
-  function parseCSVLine(line) {
-    const values = [];
-    let current = "";
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-      const char = line[i];
-      if (inQuotes) {
-        if (char === '"') {
-          if (line[i + 1] === '"') { current += '"'; i++; }
-          else { inQuotes = false; }
-        } else {
-          current += char;
-        }
-      } else if (char === '"') {
-        inQuotes = true;
-      } else if (char === ",") {
-        values.push(current.trim());
-        current = "";
-      } else {
-        current += char;
-      }
-    }
-    values.push(current.trim());
-    return values;
-  }
-
-  function parseCSV(text) {
-    const lines = text.trim().split(/\r?\n/).filter((l) => l.trim());
-    if (lines.length < 2) return [];
-    const headers = parseCSVLine(lines[0]).map((h) => h.trim().toLowerCase());
-    const rows = [];
-    for (let i = 1; i < lines.length; i++) {
-      const values = parseCSVLine(lines[i]);
-      const row = {};
-      headers.forEach((h, idx) => { row[h] = (values[idx] || "").trim(); });
-      rows.push(row);
-    }
-    return rows;
-  }
+  // CSV/JSON parsing lives in lib/menu-import.js and is shared with the brand
+  // console's master-menu importer. It used to exist twice, in two files, with
+  // the quote-aware splitter — the fiddliest part — duplicated verbatim.
+  const normalizeBool = truthy;
+  const normalizeFoodType = (val) => normalizeFoodTypeShared(val, siteSettings.pureVeg);
 
   function parseImportData(text, format) {
     let rows = [];
@@ -2004,34 +1951,15 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
   }
 
   // === ANALYTICS SUB-VIEWS ===
+  // Analytics live in lib/analytics.js, tested against merged bills, empty
+  // restaurants, and out-of-range orders. These wrappers just bind the data.
   function computeAnalytics(filterKey) {
-    const start = filterRangeStart(filterKey);
-    const inRange = revenueOrders(orders.filter((o) => o.createdAt >= start));
-    const totalSales = inRange.reduce((s, o) => s + (o.billTotal || 0), 0);
-    const orderCount = inRange.length;
-    const avg = orderCount > 0 ? Math.round(totalSales / orderCount) : 0;
-
-    const hourBuckets = Array(24).fill(0);
-    inRange.forEach((o) => { hourBuckets[new Date(o.createdAt).getHours()]++; });
-    const peakHour = hourBuckets.indexOf(Math.max(...hourBuckets));
-
-    // Counted by resolved item id so a dish's variations roll up into one row
-    // instead of appearing as several phantom dishes.
-    const qtyById = soldQtyByItem(inRange, menuItems);
-    const topItems = Object.entries(qtyById)
-      .map(([key, qty]) => [menuItems.find((m) => m.id === key)?.name || key, qty])
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 8);
-
-    return { totalSales, orderCount, avg, hourBuckets, peakHour, topItems, inRange };
+    return computeAnalyticsPure({ orders, menuItems, filterKey });
   }
 
   // NEW: shared human-readable label for the analytics filter — used on the
   // Order History / Items Sold export & print reports so it's obvious which
   // date range the report covers.
-  function filterLabel(filterKey) {
-    return { today: "Today", "3days": "Last 3 Days", week: "Last Week", month: "Last Month" }[filterKey] || "All Time";
-  }
 
   // === NEW: Order History — Export CSV + colour-highlighted Print report,
   // mirroring the Sales Analytics report but scoped to every order (not just
@@ -2172,26 +2100,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
 
   // === NEW: Daily Report export (CSV + printable PDF) ===
   function buildTodayReportData() {
-    const todays = orders.filter((o) => isToday(o.createdAt));
-    const billedToday = revenueOrders(todays);
-    const totalSales = billedToday.reduce((s, o) => s + (o.billTotal || 0), 0);
-    const totalDiscounts = billedToday.reduce((s, o) => s + (o.billDiscountTotal || (o.billDiscounts || []).reduce((x, d) => x + d.amount, 0)), 0);
-    const totalTax = billedToday.reduce((s, o) => s + (o.billTaxAmount || 0), 0);
-    const totalService = billedToday.reduce((s, o) => s + (o.billServiceAmount || 0), 0);
-    const qtyById = soldQtyByItem(billedToday, menuItems);
-    const topItems = Object.entries(qtyById)
-      .map(([key, qty]) => [menuItems.find((m) => m.id === key)?.name || key, qty])
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10);
-    const hourBuckets = Array(24).fill(0);
-    todays.forEach((o) => hourBuckets[new Date(o.createdAt).getHours()]++);
-    const peakHour = hourBuckets.indexOf(Math.max(...hourBuckets));
-    const paymentBreakdown = {};
-    billedToday.filter((o) => o.status === "paid").forEach((o) => {
-      const m = o.paymentMethod || "unspecified";
-      paymentBreakdown[m] = (paymentBreakdown[m] || 0) + (o.billTotal || 0);
-    });
-    return { todays, billedToday, totalSales, totalDiscounts, totalTax, totalService, topItems, peakHour, paymentBreakdown, avgOrderValue: billedToday.length ? Math.round(totalSales / billedToday.length) : 0 };
+    return buildTodayReport({ orders, menuItems });
   }
 
   function exportTodayCSV() {
