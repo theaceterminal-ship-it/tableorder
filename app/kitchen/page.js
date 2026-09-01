@@ -3,6 +3,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { startOfDay } from "@/lib/orders";
+import { orderTypeMeta, isDelivery, orderDestinationLabel } from "@/lib/order-types";
 import { db } from "@/lib/firebase";
 import { AuthGuard } from "@/lib/auth-guard";
 import { useAuth } from "@/lib/auth-context";
@@ -154,7 +155,8 @@ function printKitchenTicket(order) {
         <body>
           <div class="center title">KITCHEN ORDER TICKET</div>
           <div class="divider"></div>
-          <div class="row"><span>Table</span><span>${escapeHtml(order.table)}</span></div>
+          <div class="row"><span>${order.orderType === "delivery" ? "DELIVERY" : order.orderType === "takeaway" ? "TAKEAWAY" : "Table"}</span><span>${escapeHtml(order.orderType === "delivery" || order.orderType === "takeaway" ? "" : order.table)}</span></div>
+          ${order.orderType === "delivery" ? '<div class="vip">*** FOR DELIVERY - PACK TO TRAVEL ***</div>' : ""}
           <div class="row"><span>Time</span><span>${new Date(order.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></div>
           ${order.isVIP ? `<div class="vip">★ VIP ORDER ★</div>` : ""}
           <div class="divider"></div>
@@ -235,7 +237,9 @@ function TicketCard({ order, type, isMobile, menuImageMap, children }) {
       )}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: isMobile ? 12 : 14 }}>
         <div>
-          <div style={{ fontSize: isMobile ? 24 : 28, fontWeight: 800, color: "var(--primary)" }}>Table {order.table}</div>
+          <div style={{ fontSize: isMobile ? 24 : 28, fontWeight: 800, color: isDelivery(order) ? orderTypeMeta("delivery").color : "var(--primary)" }}>
+            {orderDestinationLabel(order)}
+          </div>
           <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 2 }}>
             {new Date(order.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · {getElapsed(order)} ago
           </div>

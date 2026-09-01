@@ -4,10 +4,12 @@
 import { useEffect, useState, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import CrmSection from "./sections/CrmSection";
+import OnlineOrderingSection from "./sections/OnlineOrderingSection";
+import { orderTypeMeta, isDelivery, formatDeliveryAddress } from "@/lib/order-types";
 import {
   useOrders, useMenuItems, useCategories, useTables, useFloors,
   useOfferBanners, useBundleRules, useWaiterCalls, useCustomers,
-  useStaff, useBillCustomers, useOutletInfo,
+  useStaff, useBillCustomers, useOutletInfo, useDeliveryDetails,
 } from "@/lib/use-outlet-data";
 import { db } from "@/lib/firebase";
 import { uploadToCloudinary } from "@/lib/cloudinary";
@@ -113,18 +115,22 @@ function StatCard({ label, value, color, sub, onClick }) {
 // A party across tables 1 and 2 is ONE group of guests eating together and one
 // bill, so showing it as two unrelated cards is both confusing on a busy floor
 // and how you end up handing them two bills.
-function OrderCard({ order, children, onMoveClick, groupTables, sourceTables }) {
+function OrderCard({ order, children, onMoveClick, groupTables, sourceTables, delivery }) {
   const isGroup = groupTables && groupTables.length > 1;
+  const typeMeta = orderTypeMeta(order.orderType);
+  const forDelivery = isDelivery(order);
   return (
     <div className="card" style={{ padding: 16, borderRadius: 14, animation: "riseIn 0.3s ease", position: "relative", borderLeft: order.isVIP ? "4px solid #eab308" : (order.orderType === "takeaway" ? "4px solid #8b5cf6" : undefined) }}>
       {order.isVIP && <span style={{ position: "absolute", top: -8, right: 10, background: "#eab308", color: "#1a1a2e", fontSize: 10, fontWeight: 800, padding: "2px 9px", borderRadius: 100 }}>VIP</span>}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 30, height: 30, borderRadius: 9, background: isGroup ? "#6d28d9" : "#1a1a2e", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: isGroup ? 11 : 13 }}>
-            {isGroup ? groupTables.length + "T" : order.table}
+          <div style={{ width: 30, height: 30, borderRadius: 9, background: forDelivery ? typeMeta.color : (isGroup ? "#6d28d9" : "#1a1a2e"), color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: isGroup ? 11 : 13 }}>
+            {forDelivery ? typeMeta.icon : (isGroup ? groupTables.length + "T" : order.table)}
           </div>
           <span style={{ fontWeight: 700, fontSize: 14.5 }}>
-            {isGroup ? `Tables ${groupTables.join(" + ")}` : `Table ${order.table}`}
+            {forDelivery ? "Delivery"
+              : isGroup ? `Tables ${groupTables.join(" + ")}`
+              : `Table ${order.table}`}
           </span>
           {isGroup && (
             <span title={`One party across tables ${groupTables.join(", ")} — one bill`}
@@ -139,6 +145,18 @@ function OrderCard({ order, children, onMoveClick, groupTables, sourceTables }) 
         </div>
         <span style={{ fontSize: 11.5, color: "var(--text-secondary, #6b6b7b)" }}>{new Date(order.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
       </div>
+      {/* A rider cannot deliver from a ticket that does not say where to. */}
+      {forDelivery && delivery && (
+        <div style={{ background: typeMeta.bg, borderRadius: 10, padding: "9px 11px", marginBottom: 10, fontSize: 12.5, lineHeight: 1.5 }}>
+          <div style={{ fontWeight: 700, color: typeMeta.color }}>{delivery.name} · {delivery.phone}</div>
+          <div style={{ color: typeMeta.color, opacity: 0.85 }}>{formatDeliveryAddress(delivery)}</div>
+          {delivery.paymentMethod && (
+            <div style={{ color: typeMeta.color, opacity: 0.7, marginTop: 3, textTransform: "uppercase", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.4 }}>
+              {delivery.paymentMethod === "cod" ? "💵 Cash on delivery" : "📱 UPI on delivery"}
+            </div>
+          )}
+        </div>
+      )}
       {order.items.map((it, i) => (
         <div key={i} style={{ padding: "3px 0" }}>
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13.5 }}>
@@ -378,6 +396,9 @@ function ReceptionPage() {
   const customers = useCustomers(restaurantId);
   const staffList = useStaff(restaurantId);
   const billCustomers = useBillCustomers(restaurantId);
+  // Where each delivery order is going. Kept off the order document because
+  // orders are publicly readable; see firestore.rules.
+  const deliveryDetails = useDeliveryDetails(restaurantId);
   const { profile: profileDoc, billing: billingDoc, settings: settingsDoc } = useOutletInfo(restaurantId);
 
   const profile = profileDoc;
@@ -404,6 +425,7 @@ function ReceptionPage() {
     { id: "menu", label: "Menu" },
     { id: "tables", label: "Tables" },
     { id: "crm", label: "CRM" },
+    { id: "online", label: "Online" },
     { id: "settings", label: "Settings" },
   ];
 
@@ -2234,8 +2256,23 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
               ) : collapseMergedGroups(c.list).map((g) => (
                 <div key={g.key} className="card" style={{ padding: 14, borderRadius: 12, marginBottom: 10, borderLeft: g.rep.isVIP ? "4px solid #eab308" : undefined }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                    <span style={{ fontWeight: 700, fontSize: 13.5 }}>
-                      {g.tables.length > 1 ? `Tables ${g.tables.join(" + ")}` : `Table ${g.rep.table}`}
+                    <span style={{ fontWeight: 700, fontSize: 13.5, display: "flex", alignItems: "center", gap: 6 }}>
+                      {isDelivery(g.rep) ? (
+                        <>
+                          {/* Delivery must never look like takeaway on a kitchen
+                              ticket: one is collected at the counter, the other
+                              leaves with a rider, and packing them the same way
+                              is how cold food goes out. */}
+                          <span style={{ background: orderTypeMeta("delivery").bg, color: orderTypeMeta("delivery").color, fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 100 }}>
+                            🛵 DELIVERY
+                          </span>
+                          {deliveryDetails[g.rep.id]?.name || ""}
+                        </>
+                      ) : g.rep.orderType === "takeaway" ? (
+                        <span style={{ background: orderTypeMeta("takeaway").bg, color: orderTypeMeta("takeaway").color, fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 100 }}>
+                          📦 TAKEAWAY
+                        </span>
+                      ) : g.tables.length > 1 ? `Tables ${g.tables.join(" + ")}` : `Table ${g.rep.table}`}
                     </span>
                     <span style={{ fontSize: 11.5, color: "var(--text-secondary, #6b6b7b)" }}>
                       {new Date(g.rep.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -2440,7 +2477,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                 {/* Actions apply to every order in the party, so confirming a
                     merged table sends all of it to the kitchen at once. */}
                 {orderFilter === "pending" && currentData.map((g) => (
-                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables}>
+                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]}>
                     <button className="btn btn-sm btn-danger" style={{ flex: 1 }}
                       onClick={() => g.orders.forEach((o) => declineOrder(o.id))}>Decline</button>
                     <button className="btn btn-sm btn-primary" style={{ flex: 1 }}
@@ -2448,7 +2485,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                   </OrderCard>
                 ))}
                 {orderFilter === "active" && currentData.map((g) => (
-                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} onMoveClick={g.tables.length > 1 ? undefined : openMoveOrder}>
+                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]} onMoveClick={g.tables.length > 1 ? undefined : openMoveOrder}>
                     {g.orders.some((o) => o.status === "ready") ? (
                       <button className="btn btn-sm btn-success" style={{ width: "100%" }}
                         onClick={() => g.orders.filter((o) => o.status === "ready").forEach((o) => markServed(o.id))}>
@@ -2460,14 +2497,14 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                   </OrderCard>
                 ))}
                 {orderFilter === "served" && currentData.map((g) => (
-                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables}>
+                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]}>
                     <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(g.rep)} style={{ flex: 1 }}>
                       Generate {g.tables.length > 1 ? "one bill" : "Bill"}
                     </button>
                   </OrderCard>
                 ))}
                 {orderFilter === "billRequested" && currentData.map((g) => (
-                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables}>
+                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]}>
                     <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(g.rep)} style={{ flex: 1 }}>
                       Generate {g.tables.length > 1 ? "one bill" : "Bill"}
                     </button>
@@ -3861,6 +3898,13 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
           {activeTab === "menu" && renderMenu()}
           {activeTab === "tables" && renderTables()}
           {activeTab === "crm" && renderCRM()}
+          {activeTab === "online" && (
+            <OnlineOrderingSection
+              outletId={restaurantId}
+              restaurantName={profile?.name || ""}
+              settings={settingsDoc}
+            />
+          )}
           {activeTab === "settings" && renderSettings()}
         </div>
       </main>
