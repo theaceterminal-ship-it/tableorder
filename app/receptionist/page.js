@@ -7,9 +7,13 @@ import CrmSection from "./sections/CrmSection";
 import OnlineOrderingSection from "./sections/OnlineOrderingSection";
 import { orderTypeMeta, isDelivery, formatDeliveryAddress } from "@/lib/order-types";
 import {
+  issueTableToken, openTableSession, closeTableSession, openSessionsFor, closeSessionsFor,
+} from "@/lib/table-sessions-store";
+import { tableUrl, isSessionOpen } from "@/lib/table-session";
+import {
   useOrders, useMenuItems, useCategories, useTables, useFloors,
   useOfferBanners, useBundleRules, useWaiterCalls, useCustomers,
-  useStaff, useBillCustomers, useOutletInfo, useDeliveryDetails,
+  useStaff, useBillCustomers, useOutletInfo, useDeliveryDetails, useTableSessions,
 } from "@/lib/use-outlet-data";
 import { db } from "@/lib/firebase";
 import { uploadToCloudinary } from "@/lib/cloudinary";
@@ -399,6 +403,12 @@ function ReceptionPage() {
   // Where each delivery order is going. Kept off the order document because
   // orders are publicly readable; see firestore.rules.
   const deliveryDetails = useDeliveryDetails(restaurantId);
+  const tableSessions = useTableSessions(restaurantId);
+
+  // Whether a table's QR code will currently accept an order.
+  function sessionOpenFor(tableNumber) {
+    return isSessionOpen(tableSessions[String(tableNumber)]);
+  }
   const { profile: profileDoc, billing: billingDoc, settings: settingsDoc } = useOutletInfo(restaurantId);
 
   const profile = profileDoc;
@@ -506,6 +516,11 @@ function ReceptionPage() {
   const [mergePrimary, setMergePrimary] = useState(null);
   const [mergeSelected, setMergeSelected] = useState([]);
   const [qrModalTable, setQrModalTable] = useState(null);
+  // The token is returned exactly once, when it is issued. Nothing can read it
+  // back, so it lives here only until the modal closes.
+  const [qrToken, setQrToken] = useState("");
+  const [qrIssuing, setQrIssuing] = useState(false);
+  const [sessionBusy, setSessionBusy] = useState(null);
   const [movingOrder, setMovingOrder] = useState(null);
   const [moveTargetTable, setMoveTargetTable] = useState("");
 
@@ -1412,15 +1427,58 @@ function ReceptionPage() {
     const batch = writeBatch(db);
     activeForTable.forEach((o) => batch.update(doc(db, "restaurants", restaurantId, "orders", o.id), { status: "cancelled" }));
     await batch.commit();
+    // Freeing a table also ends its ordering window, so a code left on an empty
+    // table stops working the moment the party leaves.
+    await closeTableSession(restaurantId, tableNumber).catch(() => {});
   }
 
-  function qrUrlFor(tableNumber) {
-    const link = `${siteUrl}/table?table=${tableNumber}&restaurant=${restaurantId}`;
+  function qrUrlFor(tableNumber, token) {
+    const link = tableUrl(siteUrl, restaurantId, tableNumber, token);
     return `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(link)}`;
   }
-  function printQr(tableNumber) {
+
+  // Issuing a token protects the table — and invalidates whatever code is
+  // currently stuck to it. Deliberately explicit, because a stale printed code
+  // means guests at that table cannot order until it is replaced.
+  async function openQrFor(table) {
+    setQrModalTable(table);
+    setQrToken("");
+    setQrIssuing(true);
+    try {
+      setQrToken(await issueTableToken(restaurantId, table.number));
+    } catch (e) {
+      alert(e?.code === "permission-denied"
+        ? "You do not have permission to generate codes for this outlet."
+        : `Could not generate a code: ${e.message}`);
+      setQrModalTable(null);
+    } finally {
+      setQrIssuing(false);
+    }
+  }
+
+  // Seating and clearing a table is what opens and closes its ordering window.
+  // A merged party is handled as one, so seating does not leave half of them
+  // unable to order.
+  async function setSeated(tableNumber, seated) {
+    setSessionBusy(tableNumber);
+    try {
+      const group = tableGroupNumbers(tableNumber);
+      if (group.length > 1) {
+        await (seated ? openSessionsFor(restaurantId, group) : closeSessionsFor(restaurantId, group));
+      } else {
+        await (seated ? openTableSession(restaurantId, tableNumber) : closeTableSession(restaurantId, tableNumber));
+      }
+    } catch (e) {
+      alert(e?.code === "permission-denied"
+        ? "You do not have permission to seat tables at this outlet."
+        : `Could not update the table: ${e.message}`);
+    } finally {
+      setSessionBusy(null);
+    }
+  }
+  function printQr(tableNumber, token) {
     const link = `${siteUrl}/table?table=${tableNumber}&restaurant=${restaurantId}`;
-    const imgUrl = qrUrlFor(tableNumber);
+    const imgUrl = qrUrlFor(tableNumber, token);
     const html = `
       <html><head><title>Table ${tableNumber} QR</title>
         <style>
@@ -3435,8 +3493,24 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                               {t.isVIP ? "★ VIP Table" : "Mark as VIP"}
                             </button>
                           )}
+                          {/* Seating a table is what opens its ordering window.
+                              Until it is seated, its QR code will not accept an
+                              order — which is what stops orders arriving from
+                              outside the restaurant. */}
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setSeated(t.number, !sessionOpenFor(t.number)); }}
+                            disabled={sessionBusy === t.number}
+                            className="btn btn-sm"
+                            style={{
+                              width: "100%", marginBottom: 8, border: "none",
+                              background: sessionOpenFor(t.number) ? "#dcfce7" : "var(--surface-2, #f3efe6)",
+                              color: sessionOpenFor(t.number) ? "#166534" : "#888",
+                            }}>
+                            {sessionBusy === t.number ? "…"
+                              : sessionOpenFor(t.number) ? "🟢 Seated · ordering open" : "Seat table"}
+                          </button>
                           <div style={{ display: "grid", gridTemplateColumns: (!mergeMode && !t.isMerged) ? "repeat(3, minmax(0, 1fr))" : "repeat(2, minmax(0, 1fr))", gap: 6, marginBottom: 8 }}>
-                            <button onClick={(e) => { e.stopPropagation(); setQrModalTable(t); }} className="btn btn-sm btn-ghost" style={{ minWidth: 0, padding: "8px 4px", fontSize: 12 }}>Print QR</button>
+                            <button onClick={(e) => { e.stopPropagation(); openQrFor(t); }} className="btn btn-sm btn-ghost" style={{ minWidth: 0, padding: "8px 4px", fontSize: 12 }}>Print QR</button>
                             {!mergeMode && !t.isMerged && (
                               <button onClick={(e) => { e.stopPropagation(); startMerge(t.id); }} className="btn btn-sm btn-ghost" style={{ minWidth: 0, padding: "8px 4px", fontSize: 12 }}>Merge</button>
                             )}
@@ -3644,11 +3718,25 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
   const qrModal = qrModalTable && (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 400, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setQrModalTable(null)}>
       <div style={{ background: "#fff", borderRadius: 20, padding: 28, maxWidth: 320, width: "90%", textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
-        <h3 style={{ fontSize: 18, fontWeight: 800, marginBottom: 14 }}>Table {qrModalTable.number}</h3>
-        {siteUrl && <img src={qrUrlFor(qrModalTable.number)} alt="" style={{ width: 200, height: 200, marginBottom: 16 }} />}
+        <h3 style={{ fontSize: 18, fontWeight: 800, marginBottom: 4 }}>Table {qrModalTable.number}</h3>
+        <p style={{ fontSize: 12.5, color: "#888", margin: "0 0 14px", lineHeight: 1.5 }}>
+          {qrIssuing
+            ? "Generating a secure code…"
+            : "This code is unique to this table. Print it and replace the one currently on the table."}
+        </p>
+        {siteUrl && !qrIssuing && (
+          <img src={qrUrlFor(qrModalTable.number, qrToken)} alt="" style={{ width: 200, height: 200, marginBottom: 12 }} />
+        )}
+        {qrToken && (
+          <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", color: "#166534", borderRadius: 10, padding: 11, fontSize: 12.5, lineHeight: 1.5, marginBottom: 14, textAlign: "left" }}>
+            <strong>Table {qrModalTable.number} is now protected.</strong> Orders from this table need this
+            code and an open session, so nobody can order for it from outside the restaurant.
+            <br />Print this now — the code cannot be shown again.
+          </div>
+        )}
         <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn btn-ghost" onClick={() => setQrModalTable(null)} style={{ flex: 1 }}>Close</button>
-          <button className="btn btn-primary" onClick={() => printQr(qrModalTable.number)} style={{ flex: 1 }}>Print</button>
+          <button className="btn btn-ghost" onClick={() => { setQrModalTable(null); setQrToken(""); }} style={{ flex: 1 }}>Close</button>
+          <button className="btn btn-primary" disabled={qrIssuing} onClick={() => printQr(qrModalTable.number, qrToken)} style={{ flex: 1 }}>Print</button>
         </div>
       </div>
     </div>

@@ -8,6 +8,7 @@ import { collection, addDoc, setDoc, updateDoc, doc, onSnapshot, query, where, o
 import { computeOfferPrice, computeBogoDiscount } from "@/lib/pricing";
 import { mergeItemLines, tableSessionWindowStart } from "@/lib/orders";
 import { ORDER_TYPES, DELIVERY_TABLE, validateDeliveryDetails, normalizePhone } from "@/lib/order-types";
+import { isSessionOpen, BLOCKED_MESSAGES } from "@/lib/table-session";
 import {
   DEFAULT_WEBSITE, orderingBlockedReason, blockedMessage,
   deliveryFeeFor, shortfallToFreeDelivery, todayHoursLabel, isOpenAt,
@@ -675,6 +676,8 @@ export function TableContent({ mode = "table" }) {
   const [payMethod, setPayMethod] = useState("cod");
   const [placedOrderId, setPlacedOrderId] = useState(null);
   const [website, setWebsite] = useState(DEFAULT_WEBSITE);
+  const [tableSession, setTableSession] = useState(undefined); // undefined = still loading
+  const [orderError, setOrderError] = useState("");
   const [allOrdersRaw, setAllOrdersRaw] = useState([]);
   const [activeOrders, setActiveOrders] = useState([]);
   const [cart, setCart] = useState({});
@@ -770,6 +773,18 @@ export function TableContent({ mode = "table" }) {
     const unsub = onSnapshot(q, (snap) => setTables(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
     return () => unsub();
   }, [restaurantId]);
+
+  // This table's ordering window. Readable on purpose: a guest whose order is
+  // refused should be told the table is closed, not shown a bare failure.
+  useEffect(() => {
+    if (!restaurantId || !tableNo || isDeliveryMode) return;
+    const unsub = onSnapshot(
+      doc(db, "restaurants", restaurantId, "tableSessions", String(tableNo)),
+      (snap) => setTableSession(snap.exists() ? snap.data() : null),
+      () => setTableSession(null),
+    );
+    return () => unsub();
+  }, [restaurantId, tableNo, isDeliveryMode]);
 
   useEffect(() => {
     if (!restaurantId) return;
@@ -1131,7 +1146,15 @@ export function TableContent({ mode = "table" }) {
       return;
     }
 
-    await addDoc(collection(db, "restaurants", restaurantId, "orders"), {
+    // A table that has been given a code but is not seated will be refused by
+    // security rules. Saying so first is kinder than letting the write fail.
+    if (tableToken && tableSession !== undefined && !isSessionOpen(tableSession)) {
+      setOrderError(BLOCKED_MESSAGES[tableSession ? "session-expired" : "no-session"]);
+      return;
+    }
+
+    try {
+      await addDoc(collection(db, "restaurants", restaurantId, "orders"), {
       table: tableNo,
       items,
       status: "pending",
@@ -1143,7 +1166,16 @@ export function TableContent({ mode = "table" }) {
       // Only sent when the QR carried one. Tables whose codes predate the token
       // scheme keep working; see firestore.rules.
       ...(tableToken ? { tableToken } : {}),
-    });
+      });
+    } catch (e) {
+      // The rules are the real gate; this is only what the guest sees when the
+      // answer is no.
+      setOrderError(e?.code === "permission-denied"
+        ? BLOCKED_MESSAGES[tableToken ? "session-expired" : "no-token"]
+        : "Could not place your order. Please try again or ask a staff member.");
+      return;
+    }
+    setOrderError("");
 
     setCart({});
     setOrderType("dinein");
@@ -1420,6 +1452,12 @@ export function TableContent({ mode = "table" }) {
                 </button>
               ))}
             </div>
+          </div>
+        )}
+
+        {orderError && (
+          <div style={{ background: "#fef2f2", border: "1px solid #fecaca", color: "#b91c1c", padding: 14, borderRadius: 12, fontSize: 13.5, marginTop: 18 }}>
+            {orderError}
           </div>
         )}
 
