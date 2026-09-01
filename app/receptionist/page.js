@@ -1,8 +1,13 @@
 "use client";
 
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
+import {
+  useOrders, useMenuItems, useCategories, useTables, useFloors,
+  useOfferBanners, useBundleRules, useWaiterCalls, useCustomers,
+  useStaff, useBillCustomers, useOutletInfo,
+} from "@/lib/use-outlet-data";
 import { db } from "@/lib/firebase";
 import { uploadToCloudinary } from "@/lib/cloudinary";
 import JSZip from "jszip"; // npm install jszip
@@ -358,6 +363,35 @@ function ReceptionPage() {
   const { role, logout, restaurantId, features, access, brand, brandId, user, setActiveOutlet } = useAuth();
   const router = useRouter();
 
+  // Every collection this outlet owns, each bounded and ordered in one place.
+  // These were fourteen inline listeners with fourteen ideas of how much
+  // history to load, which is how one of them ended up unbounded.
+  const { orders, ordersLoaded } = useOrders(restaurantId);
+  const menuItems = useMenuItems(restaurantId);
+  const categories = useCategories(restaurantId);
+  const tables = useTables(restaurantId);
+  const floors = useFloors(restaurantId);
+  const offerBanners = useOfferBanners(restaurantId);
+  const bundleRules = useBundleRules(restaurantId);
+  const waiterCalls = useWaiterCalls(restaurantId);
+  const customers = useCustomers(restaurantId);
+  const staffList = useStaff(restaurantId);
+  const billCustomers = useBillCustomers(restaurantId);
+  const { profile: profileDoc, billing: billingDoc, settings: settingsDoc } = useOutletInfo(restaurantId);
+
+  const profile = profileDoc;
+  const billing = billingDoc;
+  // Defaults applied here rather than at every read site, so a restaurant that
+  // has never opened Settings still has sane thresholds.
+  const siteSettings = useMemo(() => ({
+    hasBar: !!settingsDoc?.hasBar,
+    pureVeg: !!settingsDoc?.pureVeg,
+    googleReviewLink: settingsDoc?.googleReviewLink || "",
+    thresholdMostLoved: settingsDoc?.thresholdMostLoved ?? 4.5,
+    thresholdMostOrdered: settingsDoc?.thresholdMostOrdered ?? 100,
+    thresholdMostRated: settingsDoc?.thresholdMostRated ?? 50,
+  }), [settingsDoc]);
+
   // Kitchen is a live window onto the board, for anyone who runs the outlet
   // rather than works the pass. A manager covering three branches needs to see
   // whether the kitchen is drowning without walking into it, and reception
@@ -377,21 +411,15 @@ function ReceptionPage() {
   const [dashboardView, setDashboardView] = useState("main"); // main | sales | orders | items
   const [analyticsFilter, setAnalyticsFilter] = useState("today"); // today | 3days | week | month
   const [orderFilter, setOrderFilter] = useState("pending");
-  const [orders, setOrders] = useState([]);
   const [tick, setTick] = useState(0);
-  const [profile, setProfile] = useState({ name: "", tagline: "", logoUrl: "", address: "" });
   const [profileForm, setProfileForm] = useState({ name: "", tagline: "", logoUrl: "", address: "" });
   const [savedMsg, setSavedMsg] = useState(false);
   const [editingProfile, setEditingProfile] = useState(false); // profile card starts collapsed; opens on "Edit Profile"
-  const [menuItems, setMenuItems] = useState([]);
   const [newItem, setNewItem] = useState({ name: "", description: "", price: "", category: "", imageUrl: "", chefSpecial: false, foodType: "veg", variations: [], addons: [], bogoEnabled: false, etaMinutes: "" });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
-  const [billing, setBilling] = useState({ taxPercent: 5, servicePercent: 0, upiId: "", upiSelfPayEnabled: false });
   const [billingForm, setBillingForm] = useState({ taxPercent: 5, servicePercent: 0, upiId: "", upiSelfPayEnabled: false });
   const [billingSaved, setBillingSaved] = useState(false);
-  const [tables, setTables] = useState([]);
-  const [floors, setFloors] = useState([]);
   const [showAddFloor, setShowAddFloor] = useState(false);
   const [newFloorName, setNewFloorName] = useState("");
   const [selectedFloorId, setSelectedFloorId] = useState(null);
@@ -407,7 +435,6 @@ function ReceptionPage() {
   const [uploadingImage, setUploadingImage] = useState(false);
   const [editUploading, setEditUploading] = useState(false);
   const [logoUploading, setLogoUploading] = useState(false);
-  const [categories, setCategories] = useState([]);
   const [menuTab, setMenuTab] = useState("all");
   const [menuSearch, setMenuSearch] = useState("");
   const [showAddCategory, setShowAddCategory] = useState(false);
@@ -442,7 +469,6 @@ function ReceptionPage() {
   const [importReport, setImportReport] = useState(null);
 
   // --- NEW: Smart Suggestions / Bundle rule engine state ---
-  const [bundleRules, setBundleRules] = useState([]);
   const [showAddBundleRule, setShowAddBundleRule] = useState(false);
   const [newBundleRule, setNewBundleRule] = useState({
     name: "", type: "pairDiscount", requiredItemA: "", requiredItemB: "",
@@ -451,7 +477,6 @@ function ReceptionPage() {
   });
 
   // --- NEW: Call Waiter state ---
-  const [waiterCalls, setWaiterCalls] = useState([]);
 
   // --- NEW: Tables — merge & move ---
   const [mergeMode, setMergeMode] = useState(false);
@@ -478,13 +503,11 @@ function ReceptionPage() {
   const [posVariantModal, setPosVariantModal] = useState(null); // { item, variationId, addonIds, qty }
 
   // --- NEW: extra settings (bar toggle + badge thresholds) ---
-  const [siteSettings, setSiteSettings] = useState({ hasBar: false, pureVeg: false, thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50 });
   const [siteSettingsForm, setSiteSettingsForm] = useState({ hasBar: false, pureVeg: false, thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50 });
   const [siteSettingsSaved, setSiteSettingsSaved] = useState(false);
 
   // --- NEW: Offer Carousel (replaces the old auto Hero Carousel) ---
   const [showManageOffers, setShowManageOffers] = useState(false);
-  const [offerBanners, setOfferBanners] = useState([]);
   const [newOfferBanner, setNewOfferBanner] = useState({ title: "", imageUrl: "", linkedItemId: "", discountPercent: "", days: [] });
   const [offerBannerUploading, setOfferBannerUploading] = useState(false);
   const offerBannerFileInputRef = useRef(null);
@@ -496,10 +519,8 @@ function ReceptionPage() {
   const [billFlowForm, setBillFlowForm] = useState({ name: "", phone: "", paymentMethod: "cash" });
 
   // --- NEW: CRM — customers collection, keyed by phone ---
-  const [customers, setCustomers] = useState([]);
   // Bill-time customer name/phone, kept out of the order docs the diner's
   // device can read. Keyed by billId.
-  const [billCustomers, setBillCustomers] = useState({});
 
   const editCategoryFileInputRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -510,16 +531,40 @@ function ReceptionPage() {
   const seededCategories = useRef(false);
 
   // Staff
-  const [staffList, setStaffList] = useState([]);
   const [outlets, setOutlets] = useState([]); // every outlet in the brand this person can reach
   // Stable primitive keys for effect dependencies — see the note below.
   const brandOutletKey = (brand?.outletIds || []).join(",");
   const accessOutletKey = access.outletIds.join(",");
-  const [ordersLoaded, setOrdersLoaded] = useState(false); // gates auto-start until real data lands
   const kdsFailedRef = useRef(new Set());                  // orders whose auto-start was permanently denied
   const [kdsError, setKdsError] = useState("");
   const [seeding, setSeeding] = useState(false);
   const [seedResult, setSeedResult] = useState(null);
+
+  // The edit forms start from whatever is stored. Previously this happened
+  // inside each listener; keeping it as its own effect means the listener does
+  // one job and the form is seeded from a value rather than a snapshot.
+  useEffect(() => { if (profileDoc) setProfileForm(profileDoc); }, [profileDoc]);
+  useEffect(() => { if (billingDoc) setBillingForm(billingDoc); }, [billingDoc]);
+  useEffect(() => { setSiteSettingsForm(siteSettings); }, [siteSettings]);
+
+  // Categories seed themselves once, and Combo Packs is kept present. This used
+  // to live inside the categories listener, which meant a read handler that
+  // also wrote.
+  useEffect(() => {
+    if (!restaurantId) return;
+    if (categories.length === 0 && !seededCategories.current) {
+      seededCategories.current = true;
+      (async () => {
+        for (let i = 0; i < DEFAULT_CATEGORIES.length; i++) {
+          const slug = DEFAULT_CATEGORIES[i].toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+          await setDoc(doc(db, "restaurants", restaurantId, "categories", slug), { name: DEFAULT_CATEGORIES[i], imageUrl: "", order: i, createdAt: Date.now() }, { merge: true });
+        }
+      })();
+    }
+    if (categories.length > 0 && !categories.some((c) => c.name === COMBO_CATEGORY)) {
+      setDoc(doc(db, "restaurants", restaurantId, "categories", "combo-packs"), { name: COMBO_CATEGORY, imageUrl: "", order: categories.length, createdAt: Date.now() }, { merge: true }).catch(() => {});
+    }
+  }, [restaurantId, categories]);
 
   // === splash ===
   useEffect(() => { setShowSplash(true); }, []);
@@ -568,93 +613,19 @@ function ReceptionPage() {
   }, [brandId, brandOutletKey, access.allOutlets, accessOutletKey]);
 
 
-  useEffect(() => {
-    if (!restaurantId) return;
-    // Bounded on purpose. This listener used to subscribe to every order ever
-    // written, so a reception device re-read the restaurant's entire history on
-    // every page load and the cost grew linearly forever. The window covers the
-    // longest analytics range the UI offers (Last Month); anything older is
-    // reported from rollups, not from a live listener.
-    const q = query(
-      collection(db, "restaurants", restaurantId, "orders"),
-      where("createdAt", ">=", receptionOrderWindowStart()),
-      orderBy("createdAt", "asc"),
-    );
-    const unsub = onSnapshot(q, (snap) => {
-      setOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-      setOrdersLoaded(true);
-    });
-    return () => unsub();
-  }, [restaurantId]);
 
-  useEffect(() => {
-    if (!restaurantId) return;
-    const unsub = onSnapshot(doc(db, "restaurants", restaurantId, "info", "profile"), (snap) => {
-      if (snap.exists()) { setProfile(snap.data()); setProfileForm(snap.data()); }
-    });
-    return () => unsub();
-  }, [restaurantId]);
 
-  useEffect(() => {
-    if (!restaurantId) return;
-    const unsub = onSnapshot(doc(db, "restaurants", restaurantId, "info", "billing"), (snap) => {
-      if (snap.exists()) { setBilling(snap.data()); setBillingForm(snap.data()); }
-    });
-    return () => unsub();
-  }, [restaurantId]);
 
   // NEW: bar toggle + badge thresholds
-  useEffect(() => {
-    if (!restaurantId) return;
-    const unsub = onSnapshot(doc(db, "restaurants", restaurantId, "info", "settings"), (snap) => {
-      if (snap.exists()) {
-        const d = snap.data();
-        const merged = { hasBar: !!d.hasBar, pureVeg: !!d.pureVeg, thresholdMostLoved: d.thresholdMostLoved ?? 4.5, thresholdMostOrdered: d.thresholdMostOrdered ?? 100, thresholdMostRated: d.thresholdMostRated ?? 50 };
-        setSiteSettings(merged); setSiteSettingsForm(merged);
-      }
-    });
-    return () => unsub();
-  }, [restaurantId]);
 
   // NEW: Offer Carousel banners, ordered
-  useEffect(() => {
-    if (!restaurantId) return;
-    const q = query(collection(db, "restaurants", restaurantId, "offerBanners"), orderBy("order", "asc"));
-    const unsub = onSnapshot(q, (snap) => setOfferBanners(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
-    return () => unsub();
-  }, [restaurantId]);
 
-  useEffect(() => {
-    if (!restaurantId) return;
-    const q = query(collection(db, "restaurants", restaurantId, "menuItems"), orderBy("createdAt", "asc"));
-    const unsub = onSnapshot(q, (snap) => setMenuItems(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
-    return () => unsub();
-  }, [restaurantId]);
 
   // NEW: CRM customers, live, most recently seen first
-  useEffect(() => {
-    if (!restaurantId) return;
-    const q = query(collection(db, "restaurants", restaurantId, "customers"), orderBy("lastSeen", "desc"));
-    const unsub = onSnapshot(q, (snap) => setCustomers(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
-    return () => unsub();
-  }, [restaurantId]);
 
   // Staff-only customer details for bills in the active window. Security rules
   // deny this collection to the unauthenticated diner client, which is the
   // whole point of it being separate from the order doc.
-  useEffect(() => {
-    if (!restaurantId) return;
-    const q = query(
-      collection(db, "restaurants", restaurantId, "billCustomers"),
-      where("createdAt", ">=", receptionOrderWindowStart()),
-    );
-    const unsub = onSnapshot(q, (snap) => {
-      const map = {};
-      snap.docs.forEach((d) => { map[d.id] = d.data(); });
-      setBillCustomers(map);
-    }, () => setBillCustomers({}));
-    return () => unsub();
-  }, [restaurantId]);
 
   // NEW: Most Loved / Most Ordered / Most Rated badges — previously the Settings
   // thresholds weren't connected to anything. This recomputes each item's flags
@@ -694,20 +665,8 @@ function ReceptionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orders, menuItems, siteSettings.thresholdMostOrdered, siteSettings.thresholdMostLoved, siteSettings.thresholdMostRated, restaurantId]);
 
-  useEffect(() => {
-    if (!restaurantId) return;
-    const q = query(collection(db, "restaurants", restaurantId, "tables"), orderBy("number", "asc"));
-    const unsub = onSnapshot(q, (snap) => setTables(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
-    return () => unsub();
-  }, [restaurantId]);
 
   // Floors
-  useEffect(() => {
-    if (!restaurantId) return;
-    const q = query(collection(db, "restaurants", restaurantId, "floors"), orderBy("order", "asc"));
-    const unsub = onSnapshot(q, (snap) => setFloors(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
-    return () => unsub();
-  }, [restaurantId]);
 
   // Show floor picker once per session if there's more than one floor
   useEffect(() => {
@@ -719,25 +678,6 @@ function ReceptionPage() {
   }, [floors]);
 
   // Categories: live sync + one-time seed (+ always ensure Combo Packs exists, + Bar when enabled)
-  useEffect(() => {
-    if (!restaurantId) return;
-    const q = query(collection(db, "restaurants", restaurantId, "categories"), orderBy("order", "asc"));
-    const unsub = onSnapshot(q, async (snap) => {
-      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      setCategories(list);
-      if (list.length === 0 && !seededCategories.current) {
-        seededCategories.current = true;
-        for (let i = 0; i < DEFAULT_CATEGORIES.length; i++) {
-          const slug = DEFAULT_CATEGORIES[i].toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
-          await setDoc(doc(db, "restaurants", restaurantId, "categories", slug), { name: DEFAULT_CATEGORIES[i], imageUrl: "", order: i, createdAt: Date.now() }, { merge: true });
-        }
-      }
-      if (list.length > 0 && !list.some((c) => c.name === COMBO_CATEGORY)) {
-        await setDoc(doc(db, "restaurants", restaurantId, "categories", "combo-packs"), { name: COMBO_CATEGORY, imageUrl: "", order: list.length, createdAt: Date.now() }, { merge: true });
-      }
-    });
-    return () => unsub();
-  }, [restaurantId]);
 
   // NEW: auto-create/remove the Bar category when the toggle changes
   useEffect(() => {
@@ -750,20 +690,8 @@ function ReceptionPage() {
   }, [siteSettings.hasBar, categories, restaurantId]);
 
   // NEW: bundle / smart-suggestion rules
-  useEffect(() => {
-    if (!restaurantId) return;
-    const q = query(collection(db, "restaurants", restaurantId, "bundleRules"), orderBy("createdAt", "desc"));
-    const unsub = onSnapshot(q, (snap) => setBundleRules(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
-    return () => unsub();
-  }, [restaurantId]);
 
   // NEW: waiter calls, live, newest first
-  useEffect(() => {
-    if (!restaurantId) return;
-    const q = query(collection(db, "restaurants", restaurantId, "waiterCalls"), orderBy("createdAt", "desc"));
-    const unsub = onSnapshot(q, (snap) => setWaiterCalls(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
-    return () => unsub();
-  }, [restaurantId]);
 
   // NEW: auto-clear acknowledged waiter calls older than 10 minutes (client-side housekeeping)
   useEffect(() => {
@@ -773,12 +701,6 @@ function ReceptionPage() {
   }, [tick]);
 
   // Staff
-  useEffect(() => {
-    if (!restaurantId) return;
-    const q = query(collection(db, "restaurants", restaurantId, "staff"));
-    const unsub = onSnapshot(q, (snap) => setStaffList(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
-    return () => unsub();
-  }, [restaurantId]);
 
   useEffect(() => { requestNotificationPermission(); }, []);
 
