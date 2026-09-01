@@ -7,9 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run --exclude \"**/rules/**\" --exclude \"**/node_modules/**\"",
+    "test": "npm run lint:undef && vitest run --exclude \"**/rules/**\" --exclude \"**/node_modules/**\"",
     "test:watch": "vitest",
-    "test:rules": "node scripts/test-rules.mjs"
+    "test:rules": "node scripts/test-rules.mjs",
+    "lint:undef": "eslint --no-config-lookup -c undef.config.mjs app lib"
   },
   "dependencies": {
     "firebase": "^12.16.0",

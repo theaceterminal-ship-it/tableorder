@@ -24,6 +24,10 @@ import {
   computeAnalytics as computeAnalyticsPure, buildTodayReport, filterLabel,
 } from "@/lib/analytics";
 import {
+  itemHasOptions, addLine, adjustLineQty, cartLines, cartSubtotal, posLineKey,
+  qtyForItem, plainQtyForItem, estimatedEta,
+} from "@/lib/pos-cart";
+import {
   startCooking as kdsStart, markReady as kdsReady, adjustEta as kdsAdjustEta,
   returnToQueue as kdsReturn, autoStartNext, ETA_PRESETS, DEFAULT_ETA,
   MAX_CONCURRENT_PREPARING,
@@ -929,15 +933,11 @@ function ReceptionPage() {
   // and either auto-starts the countdown immediately (if it has capacity) or
   // pre-fills the "Start Preparing" button with it — reception never has to
   // think about kitchen timing at all.
+  // Longest prep time in the basket, floored at 15 — see lib/pos-cart.js.
   function computeOrderEta(items) {
-    let maxEta = 15;
-    (items || []).forEach((it) => {
-      const mi = menuItems.find((m) => m.id === it.itemId || m.name === it.name);
-      const eta = (mi && mi.etaMinutes) || 15;
-      if (eta > maxEta) maxEta = eta;
-    });
-    return maxEta;
+    return estimatedEta(items, menuItems, 15);
   }
+
   async function confirmOrder(id) {
     const order = orders.find((o) => o.id === id);
     const presetEtaMinutes = computeOrderEta(order?.items);
@@ -1883,48 +1883,26 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
   // === NEW: POS actions — now variation/add-on aware, same as the customer
   // table-side ordering flow. An item with no sizes and no add-ons still adds
   // straight to the cart with one tap; an item with either opens a picker.
-  function posItemHasOptions(item) {
-    return (item.variations && item.variations.length > 0) || (item.addons && item.addons.length > 0);
-  }
-  function posLineKey(itemId, variationId, addonIds) {
-    return `${itemId}::${variationId || "base"}::${(addonIds || []).slice().sort().join("+")}`;
-  }
-  // Opens the size/add-on picker for items that have options; adds directly
-  // (qty 1) for plain items — this is what the tile's "+" / "Select Options" button calls.
+  // Cart maths lives in lib/pos-cart.js: how a variation replaces the base
+  // price rather than adding to it, how add-ons are sorted so pick order never
+  // creates a duplicate line, and how quantities merge. 20 tests.
+  function posItemHasOptions(item) { return itemHasOptions(item); }
   function posTapItem(item) {
-    if (!posItemHasOptions(item)) { posAddLine(item, null, [], 1); return; }
+    if (!itemHasOptions(item)) { posAddLine(item, null, [], 1); return; }
     setPosVariantModal({ item, variationId: item.variations?.[0]?.id || null, addonIds: [], qty: 1 });
   }
   function posAddLine(item, variationId, addonIds, qty) {
-    const variation = (item.variations || []).find((v) => v.id === variationId);
-    const addons = (item.addons || []).filter((a) => (addonIds || []).includes(a.id));
-    const basePrice = variation ? variation.price : item.price;
-    const addonsTotal = addons.reduce((s, a) => s + a.price, 0);
-    const price = basePrice + addonsTotal;
-    const key = posLineKey(item.id, variationId, addonIds);
-    const name = item.name + (variation ? ` (${variation.name})` : "") + (addons.length ? ` + ${addons.map((a) => a.name).join(", ")}` : "");
-    setPosCart((p) => {
-      const existing = p[key];
-      return { ...p, [key]: { itemId: item.id, key, name, price, qty: (existing?.qty || 0) + qty, variationId: variationId || null, addonIds: addonIds || [] } };
-    });
+    setPosCart((p) => addLine(p, item, { variationId, addonIds: addonIds || [], qty }));
   }
   function posAdjustLineQty(key, delta) {
-    setPosCart((p) => {
-      const line = p[key];
-      if (!line) return p;
-      const nextQty = line.qty + delta;
-      if (nextQty <= 0) { const n = { ...p }; delete n[key]; return n; }
-      return { ...p, [key]: { ...line, qty: nextQty } };
-    });
+    setPosCart((p) => adjustLineQty(p, key, delta));
   }
-  // Simple (no size/add-ons) items still get quick +/- on the tile itself.
-  function posSimpleQtyFor(item) { return posCart[posLineKey(item.id, null, [])]?.qty || 0; }
-  function posTotalQtyFor(item) { return Object.values(posCart).filter((l) => l.itemId === item.id).reduce((s, l) => s + l.qty, 0); }
-  function posCartLines() {
-    return Object.values(posCart).map((l) => ({ itemId: l.itemId, key: l.key, name: l.name, price: l.price, qty: l.qty }));
-  }
+  function posSimpleQtyFor(item) { return plainQtyForItem(posCart, item.id); }
+  function posTotalQtyFor(item) { return qtyForItem(posCart, item.id); }
+  function posCartLines() { return cartLines(posCart); }
+
   const posLines = posCartLines();
-  const posSubtotal = posLines.reduce((s, l) => s + l.price * l.qty, 0);
+  const posSubtotal = cartSubtotal(posCart);
   const posDiscounts = computeBundleDiscounts(posLines, menuItems, bundleRules);
   const posDiscountTotal = posDiscounts.reduce((s, d) => s + d.amount, 0);
 
