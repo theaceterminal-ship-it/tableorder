@@ -87,14 +87,29 @@ function StatCard({ label, value, color, sub, onClick }) {
   );
 }
 
-function OrderCard({ order, children, onMoveClick }) {
+// `order` may be one order, or a merged party's orders presented as one.
+// A party across tables 1 and 2 is ONE group of guests eating together and one
+// bill, so showing it as two unrelated cards is both confusing on a busy floor
+// and how you end up handing them two bills.
+function OrderCard({ order, children, onMoveClick, groupTables, sourceTables }) {
+  const isGroup = groupTables && groupTables.length > 1;
   return (
     <div className="card" style={{ padding: 16, borderRadius: 14, animation: "riseIn 0.3s ease", position: "relative", borderLeft: order.isVIP ? "4px solid #eab308" : (order.orderType === "takeaway" ? "4px solid #8b5cf6" : undefined) }}>
       {order.isVIP && <span style={{ position: "absolute", top: -8, right: 10, background: "#eab308", color: "#1a1a2e", fontSize: 10, fontWeight: 800, padding: "2px 9px", borderRadius: 100 }}>VIP</span>}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 30, height: 30, borderRadius: 9, background: "#1a1a2e", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 13 }}>{order.table}</div>
-          <span style={{ fontWeight: 700, fontSize: 14.5 }}>Table {order.table}</span>
+          <div style={{ width: 30, height: 30, borderRadius: 9, background: isGroup ? "#6d28d9" : "#1a1a2e", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: isGroup ? 11 : 13 }}>
+            {isGroup ? groupTables.length + "T" : order.table}
+          </div>
+          <span style={{ fontWeight: 700, fontSize: 14.5 }}>
+            {isGroup ? `Tables ${groupTables.join(" + ")}` : `Table ${order.table}`}
+          </span>
+          {isGroup && (
+            <span title={`One party across tables ${groupTables.join(", ")} — one bill`}
+              style={{ background: "#ede9fe", color: "#6d28d9", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 100 }}>
+              ⇄ MERGED
+            </span>
+          )}
           {order.orderType === "takeaway" && <span style={{ background: "#ede9fe", color: "#6d28d9", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 100 }}>📦 TAKEAWAY</span>}
           {onMoveClick && order.orderType !== "takeaway" && (
             <button onClick={() => onMoveClick(order)} style={{ background: "none", border: "1px solid var(--border, #e6e1d6)", borderRadius: 100, fontSize: 10.5, padding: "2px 8px", cursor: "pointer", color: "#888" }}>Move</button>
@@ -105,7 +120,15 @@ function OrderCard({ order, children, onMoveClick }) {
       {order.items.map((it, i) => (
         <div key={i} style={{ padding: "3px 0" }}>
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13.5 }}>
-            <span>{it.name}</span><span style={{ color: "var(--text-secondary, #6b6b7b)" }}>×{it.qty}</span>
+            <span>
+              {it.name}
+              {/* Which table ordered it still matters for delivery, even though
+                  the party is billed as one. */}
+              {isGroup && it._fromTable != null && (
+                <span style={{ marginLeft: 6, fontSize: 10, color: "#6d28d9", fontWeight: 700 }}>T{it._fromTable}</span>
+              )}
+            </span>
+            <span style={{ color: "var(--text-secondary, #6b6b7b)" }}>×{it.qty}</span>
           </div>
           {it.spiceLevel && <div style={{ fontSize: 11, color: "#e8a33d" }}>🌶 {it.spiceLevel}</div>}
           {it.notes && <div style={{ fontSize: 11, color: "#888", fontStyle: "italic" }}>"{it.notes}"</div>}
@@ -319,9 +342,14 @@ function ReceptionPage() {
   const { role, logout, restaurantId, features, access, brand, brandId, user, setActiveOutlet } = useAuth();
   const router = useRouter();
 
+  // Kitchen is a live window onto the board, for anyone who runs the outlet
+  // rather than works the pass. A manager covering three branches needs to see
+  // whether the kitchen is drowning without walking into it, and reception
+  // already has the same view on their own screen.
   const TABS = [
     { id: "dashboard", label: "Dashboard" },
     { id: "pos", label: "POS" },
+    { id: "kitchen", label: "Kitchen" },
     { id: "menu", label: "Menu" },
     { id: "tables", label: "Tables" },
     { id: "crm", label: "CRM" },
@@ -938,11 +966,53 @@ function ReceptionPage() {
   // order that needs to be billed together — itself alone, unless its table is
   // part of a merged group, in which case every bill_requested order across the
   // whole group comes along so the party gets one consolidated bill.
+  // Collapse a merged party's orders into a single display row.
+  //
+  // Returns entries of { rep, orders, tables, items } where `rep` stands in for
+  // the group (earliest order), `orders` is everything it covers so an action
+  // can be applied to all of them, and `items` is every line with the table it
+  // came from attached.
+  function collapseMergedGroups(list) {
+    const groups = new Map();
+    for (const o of list) {
+      const t = tables.find((tb) => tb.number === o.table);
+      const key = t?.isMerged && t.mergedGroupId ? `g:${t.mergedGroupId}` : `o:${o.id}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(o);
+    }
+    return [...groups.values()].map((os) => {
+      const sorted = [...os].sort((a, b) => a.createdAt - b.createdAt);
+      const rep = sorted[0];
+      const tablesInGroup = [...new Set(sorted.map((o) => o.table))].sort((a, b) => a - b);
+      const items = sorted.flatMap((o) => (o.items || []).map((it) => ({ ...it, _fromTable: o.table })));
+      return {
+        key: rep.id,
+        // `rep` merges every order's lines, for the working views where the
+        // party's orders are genuinely separate documents.
+        rep: { ...rep, items },
+        // `raw` is the untouched order. Billed siblings each already carry the
+        // FULL consolidated bill (generateBill writes it onto all of them so
+        // every table's device can show it), so merging their lines would list
+        // the whole party's food twice.
+        raw: rep,
+        orders: sorted,
+        tables: tablesInGroup,
+      };
+    }).sort((a, b) => a.tables[0] - b.tables[0] || a.rep.createdAt - b.rep.createdAt);
+  }
+
   function ordersForBilling(o) {
     const t = tables.find((tb) => tb.number === o.table);
     if (t && t.isMerged && t.mergedGroupId) {
       const groupTableNumbers = tables.filter((tb) => tb.mergedGroupId === t.mergedGroupId).map((tb) => tb.number);
-      const grouped = orders.filter((ord) => ord.status === "bill_requested" && groupTableNumbers.includes(ord.table));
+      // Everything the party still owes for, not only the orders whose table
+      // happened to press "request bill". One table asking used to produce a
+      // bill for that table alone, leaving the rest of the party to be billed
+      // separately — which is exactly the split bill a merged table is meant
+      // to prevent.
+      const grouped = orders.filter((ord) =>
+        groupTableNumbers.includes(ord.table)
+        && ["bill_requested", "served"].includes(ord.status));
       if (grouped.length > 0) return grouped;
     }
     return [o];
@@ -2447,6 +2517,63 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     );
   }
 
+  // A read-only mirror of the kitchen board. Deliberately read-only: cooking
+  // times are the kitchen's call, and two people advancing the same ticket from
+  // two screens is how orders get marked ready before they are.
+  const renderKitchenView = () => {
+    const cols = [
+      { key: "confirmed", label: "Waiting to start", tint: "#fef3c7", ink: "#92400e", list: orders.filter((o) => o.status === "confirmed") },
+      { key: "preparing", label: "On the stove", tint: "#dbeafe", ink: "#1e40af", list: orders.filter((o) => o.status === "preparing") },
+      { key: "ready", label: "Ready for pickup", tint: "#dcfce7", ink: "#166534", list: orders.filter((o) => o.status === "ready") },
+    ];
+    return (
+      <div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 8 }}>
+          <h2 style={{ fontSize: 24, fontWeight: 800, margin: 0, fontFamily: "'Fraunces', serif" }}>Kitchen</h2>
+          <a href="/kitchen" target="_blank" rel="noopener noreferrer" className="btn btn-ghost" style={{ textDecoration: "none" }}>
+            Open full kitchen screen ↗
+          </a>
+        </div>
+        <p style={{ fontSize: 13, color: "var(--text-secondary, #6b6b7b)", marginTop: 0, marginBottom: 20 }}>
+          A live view of what the kitchen is working on. Read-only — timings are set on the
+          kitchen screen so two people cannot advance the same ticket at once.
+        </p>
+        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3, 1fr)", gap: 14 }}>
+          {cols.map((c) => (
+            <div key={c.key}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 14px", borderRadius: 12, background: c.tint, color: c.ink, fontWeight: 800, fontSize: 13, marginBottom: 10 }}>
+                <span>{c.label}</span><span>{c.list.length}</span>
+              </div>
+              {c.list.length === 0 ? (
+                <div style={{ padding: 22, textAlign: "center", color: "var(--text-secondary, #6b6b7b)", fontSize: 13 }}>Nothing here.</div>
+              ) : collapseMergedGroups(c.list).map((g) => (
+                <div key={g.key} className="card" style={{ padding: 14, borderRadius: 12, marginBottom: 10, borderLeft: g.rep.isVIP ? "4px solid #eab308" : undefined }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <span style={{ fontWeight: 700, fontSize: 13.5 }}>
+                      {g.tables.length > 1 ? `Tables ${g.tables.join(" + ")}` : `Table ${g.rep.table}`}
+                    </span>
+                    <span style={{ fontSize: 11.5, color: "var(--text-secondary, #6b6b7b)" }}>
+                      {new Date(g.rep.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                  </div>
+                  {g.rep.items.map((it, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "2px 0" }}>
+                      <span>{it.name}{it.spiceLevel ? ` · ${it.spiceLevel}` : ""}</span>
+                      <span style={{ color: "var(--text-secondary, #6b6b7b)" }}>×{it.qty}</span>
+                    </div>
+                  ))}
+                  {g.rep.status === "preparing" && getCountdown(g.rep) && (
+                    <div style={{ marginTop: 8, fontFamily: "monospace", fontSize: 15, color: "#C1440E", fontWeight: 700 }}>⏱ {getCountdown(g.rep)}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
   // === RENDER: DASHBOARD ===
   const renderDashboard = () => {
     if (dashboardView === "sales") return renderSalesAnalytics();
@@ -2456,26 +2583,21 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     const currentSection = ORDER_SECTIONS.find((s) => s.key === orderFilter);
     // Keep a merged party's orders adjacent in the list, so the two halves of
     // one table's order don't end up separated by three unrelated tables.
-    const groupSortKey = (o) => tableGroupNumbers(o.table)[0];
-    // For "billed", collapse a merged group's duplicate per-table bills into one
-    // display card — they carry the same consolidated total (see generateBill).
-    let currentData = [...(orderDataByKey[orderFilter] || [])]
-      .sort((a, b) => groupSortKey(a) - groupSortKey(b) || a.createdAt - b.createdAt);
-    let billedTableLabels = {};
+    // One card per PARTY, not per order. A merged table is one group of guests
+    // eating together and paying once, so two cards for tables 1 and 2 is both
+    // wrong on the floor and how they end up with two bills.
+    const groups = collapseMergedGroups(orderDataByKey[orderFilter] || []);
+
+    // Billed rows carry the consolidated bill on every sibling (so each table's
+    // own device can display it), so a group must show exactly one of them.
+    const billedTableLabels = {};
     if (orderFilter === "billed") {
-      const seenGroups = new Set();
-      const deduped = [];
-      billed.forEach((o) => {
-        const t = tables.find((tb) => tb.number === o.table);
-        const groupKey = t && t.isMerged && t.mergedGroupId ? t.mergedGroupId : `single-${o.id}`;
-        if (seenGroups.has(groupKey)) return;
-        seenGroups.add(groupKey);
-        const tableNumbers = o.mergedTables && o.mergedTables.length > 0 ? o.mergedTables : [o.table];
-        billedTableLabels[o.id] = tableNumbers.join(" + ");
-        deduped.push(o);
+      groups.forEach((g) => {
+        const tableNumbers = g.rep.mergedTables?.length ? g.rep.mergedTables : g.tables;
+        billedTableLabels[g.raw.id] = [...new Set(tableNumbers)].join(" + ");
       });
-      currentData = deduped;
     }
+    const currentData = groups;
 
     return (
       <div>
@@ -2570,32 +2692,43 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
               </div>
             ) : (
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
-                {orderFilter === "pending" && currentData.map((o) => (
-                  <OrderCard key={o.id} order={o}>
-                    <button className="btn btn-sm btn-danger" onClick={() => declineOrder(o.id)} style={{ flex: 1 }}>Decline</button>
-                    <button className="btn btn-sm btn-primary" onClick={() => confirmOrder(o.id)} style={{ flex: 1 }}>Confirm → Kitchen</button>
+                {/* Actions apply to every order in the party, so confirming a
+                    merged table sends all of it to the kitchen at once. */}
+                {orderFilter === "pending" && currentData.map((g) => (
+                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables}>
+                    <button className="btn btn-sm btn-danger" style={{ flex: 1 }}
+                      onClick={() => g.orders.forEach((o) => declineOrder(o.id))}>Decline</button>
+                    <button className="btn btn-sm btn-primary" style={{ flex: 1 }}
+                      onClick={() => g.orders.forEach((o) => confirmOrder(o.id))}>Confirm → Kitchen</button>
                   </OrderCard>
                 ))}
-                {orderFilter === "active" && currentData.map((o) => (
-                  <OrderCard key={o.id} order={o} onMoveClick={openMoveOrder}>
-                    {o.status === "ready" ? (
-                      <button className="btn btn-sm btn-success" onClick={() => markServed(o.id)} style={{ width: "100%" }}>Mark as Served</button>
+                {orderFilter === "active" && currentData.map((g) => (
+                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} onMoveClick={g.tables.length > 1 ? undefined : openMoveOrder}>
+                    {g.orders.some((o) => o.status === "ready") ? (
+                      <button className="btn btn-sm btn-success" style={{ width: "100%" }}
+                        onClick={() => g.orders.filter((o) => o.status === "ready").forEach((o) => markServed(o.id))}>
+                        Mark as Served
+                      </button>
                     ) : (
                       <div style={{ fontSize: 12, color: "var(--text-secondary, #6b6b7b)", width: "100%", textAlign: "center" }}>Managed from the kitchen screen</div>
                     )}
                   </OrderCard>
                 ))}
-                {orderFilter === "served" && currentData.map((o) => (
-                  <OrderCard key={o.id} order={o}>
-                    <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(o)} style={{ flex: 1 }}>Generate Bill</button>
+                {orderFilter === "served" && currentData.map((g) => (
+                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables}>
+                    <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(g.rep)} style={{ flex: 1 }}>
+                      Generate {g.tables.length > 1 ? "one bill" : "Bill"}
+                    </button>
                   </OrderCard>
                 ))}
-                {orderFilter === "billRequested" && currentData.map((o) => (
-                  <OrderCard key={o.id} order={o}>
-                    <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(o)} style={{ flex: 1 }}>Generate Bill</button>
+                {orderFilter === "billRequested" && currentData.map((g) => (
+                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables}>
+                    <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(g.rep)} style={{ flex: 1 }}>
+                      Generate {g.tables.length > 1 ? "one bill" : "Bill"}
+                    </button>
                   </OrderCard>
                 ))}
-                {orderFilter === "billed" && currentData.map((o) => (
+                {orderFilter === "billed" && currentData.map(({ raw: o }) => (
                   <div key={o.id} className="card" style={{ padding: 16, borderRadius: 14 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                       <span style={{ fontWeight: 700 }}>
@@ -3979,6 +4112,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
         <div style={{ maxWidth: 1200, margin: "0 auto", padding: isMobile ? "20px" : "32px" }}>
           {activeTab === "dashboard" && renderDashboard()}
           {activeTab === "pos" && renderPOS()}
+          {activeTab === "kitchen" && renderKitchenView()}
           {activeTab === "menu" && renderMenu()}
           {activeTab === "tables" && renderTables()}
           {activeTab === "crm" && renderCRM()}
