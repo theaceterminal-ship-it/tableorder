@@ -46,9 +46,32 @@ npm run dev
 npm test
 ```
 
-Covers `lib/pricing.js` and `lib/orders.js` — the billing, discount, BOGO, and
-order-normalization math. This is the code most likely to cost a client real
-money if it breaks, so changes to it should come with a test.
+137 unit tests over `lib/` — billing, discounts, BOGO, order normalization,
+the permission model, the kitchen queue, and menu import. This is the code most
+likely to cost a client real money if it breaks, so changes to it should come
+with a test.
+
+### Security rules
+
+```bash
+npm run test:rules
+```
+
+54 tests run against the real Firestore emulator, exercising `firestore.rules`
+directly: what a diner can and cannot do from an unauthenticated page, what an
+outlet manager may reach, who may invite whom and over which outlets, that an
+owner cannot activate their own subscription, and that the audit log cannot be
+edited by anybody.
+
+**Run this before deploying rules.** Every boundary it covers was broken at
+least once during development and found by a human clicking through the app —
+including failures that locked staff out of their own restaurant mid-service.
+
+Requires Java (the Firestore emulator is a JVM process):
+
+```bash
+winget install --id Microsoft.OpenJDK.21 -e
+```
 
 ## Deploying Firestore rules and indexes
 
