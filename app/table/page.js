@@ -4,9 +4,14 @@
 import { Suspense, useEffect, useState, useRef, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 import { db } from "@/lib/firebase";
-import { collection, addDoc, updateDoc, doc, onSnapshot, query, where, orderBy, writeBatch } from "firebase/firestore";
+import { collection, addDoc, setDoc, updateDoc, doc, onSnapshot, query, where, orderBy, writeBatch } from "firebase/firestore";
 import { computeOfferPrice, computeBogoDiscount } from "@/lib/pricing";
 import { mergeItemLines, tableSessionWindowStart } from "@/lib/orders";
+import { ORDER_TYPES, DELIVERY_TABLE, validateDeliveryDetails, normalizePhone } from "@/lib/order-types";
+import {
+  DEFAULT_WEBSITE, orderingBlockedReason, blockedMessage,
+  deliveryFeeFor, shortfallToFreeDelivery, todayHoursLabel, isOpenAt,
+} from "@/lib/website-setup";
 
 const POPULAR_LIMIT = 8;
 const DISPLAY_FONT = "'Anton', sans-serif";
@@ -85,7 +90,7 @@ function playChime() {
   setTimeout(() => playTone(1040, 220, "triangle"), 260);
 }
 
-const GLOBAL_ANIMATION_CSS = `
+export const GLOBAL_ANIMATION_CSS = `
   @import url('https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@400;500;600;700;800&display=swap');
   @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
@@ -652,12 +657,24 @@ function ThresholdBanner({ cartTotal, activeOffer, compact }) {
 // ---------------------------------------------------------------------------
 // TableContent
 // ---------------------------------------------------------------------------
-function TableContent() {
+export function TableContent({ mode = "table" }) {
   const searchParams = useSearchParams();
   const tableParam = searchParams.get("table");
   const restaurantId = searchParams.get("restaurant");
+  // The token from the QR code. Proves this device is actually at the table —
+  // see lib/table-session.js. Absent for delivery, which has its own gate.
+  const tableToken = searchParams.get("t") || "";
+
+  // Delivery reuses this entire screen: the same menu, cart, offers and BOGO
+  // preview. Only the last step differs, where a table number would have been.
+  const isDeliveryMode = mode === "delivery";
 
   const [tableNo, setTableNo] = useState(tableParam ? parseInt(tableParam) : null);
+  const [deliveryForm, setDeliveryForm] = useState({ name: "", phone: "", address: "", landmark: "" });
+  const [deliveryErrors, setDeliveryErrors] = useState({});
+  const [payMethod, setPayMethod] = useState("cod");
+  const [placedOrderId, setPlacedOrderId] = useState(null);
+  const [website, setWebsite] = useState(DEFAULT_WEBSITE);
   const [allOrdersRaw, setAllOrdersRaw] = useState([]);
   const [activeOrders, setActiveOrders] = useState([]);
   const [cart, setCart] = useState({});
@@ -716,6 +733,7 @@ function TableContent() {
       if (snap.exists()) {
         const data = snap.data();
         setGoogleReviewLink(data.googleReviewLink || "");
+        setWebsite({ ...DEFAULT_WEBSITE, ...(data.website || {}), deliveryEnabled: !!data.deliveryEnabled });
       }
     });
     return () => unsub();
@@ -1073,6 +1091,46 @@ function TableContent() {
     // Deals engine (bundleRules + item.bogoEnabled). That's the single source
     // of truth. The banners below are just an accurate preview of what the
     // diner will see deducted from the bill.
+    if (isDeliveryMode) {
+      const errors = validateDeliveryDetails(deliveryForm);
+      if (Object.keys(errors).length > 0) { setDeliveryErrors(errors); return; }
+
+      // The order id is generated up front so the address can be written FIRST,
+      // under that same id. Security rules refuse a delivery order whose details
+      // do not already exist, which is what stops an order arriving with nowhere
+      // to send it. The address never goes on the order document itself: orders
+      // are publicly readable so a customer can track their own, and a guessable
+      // id must not become a lookup for somebody's home address.
+      const orderRef = doc(collection(db, "restaurants", restaurantId, "orders"));
+      await setDoc(doc(db, "restaurants", restaurantId, "deliveryDetails", orderRef.id), {
+        name: deliveryForm.name.trim(),
+        phone: normalizePhone(deliveryForm.phone),
+        address: deliveryForm.address.trim(),
+        landmark: deliveryForm.landmark.trim(),
+        paymentMethod: payMethod,
+        createdAt: Date.now(),
+      });
+      await setDoc(orderRef, {
+        table: DELIVERY_TABLE,
+        items,
+        status: "pending",
+        orderType: ORDER_TYPES.DELIVERY,
+        isVIP: false,
+        etaMinutes: null,
+        preparingAt: null,
+        createdAt: Date.now(),
+      });
+
+      // Kept so this device can follow its own order after a refresh. It is an
+      // id, not personal data — the address stays behind the staff-only rule.
+      try { localStorage.setItem(`cabadra:lastOrder:${restaurantId}`, orderRef.id); } catch {}
+      setPlacedOrderId(orderRef.id);
+      setCart({});
+      setShowCartSummary(false);
+      setScreen("deliveryPlaced");
+      return;
+    }
+
     await addDoc(collection(db, "restaurants", restaurantId, "orders"), {
       table: tableNo,
       items,
@@ -1082,6 +1140,9 @@ function TableContent() {
       etaMinutes: null,
       preparingAt: null,
       createdAt: Date.now(),
+      // Only sent when the QR carried one. Tables whose codes predate the token
+      // scheme keep working; see firestore.rules.
+      ...(tableToken ? { tableToken } : {}),
     });
 
     setCart({});
@@ -1142,6 +1203,14 @@ function TableContent() {
   // `displayTotal` is what the diner will actually pay.
   const bogoSavings = computeBogoDiscount(cartLines, menuItems)?.amount || 0;
   const displayTotal = Math.max(0, total - bogoSavings);
+
+  const deliveryFee = isDeliveryMode ? deliveryFeeFor(displayTotal, website) : 0;
+  const freeDeliveryShortfall = isDeliveryMode ? shortfallToFreeDelivery(displayTotal, website) : 0;
+  // Checked here so the customer is told why before they fill in an address,
+  // and enforced again by security rules, which is what actually holds.
+  const orderingBlocked = isDeliveryMode && count > 0
+    ? orderingBlockedReason({ website, subtotal: displayTotal, mode: "delivery" })
+    : null;
 
   // Which Smart Deal (if any) to surface in the ThresholdBanner — the next
   // active thresholdFreeItem rule the diner hasn't unlocked yet, or if every
@@ -1279,24 +1348,184 @@ function TableContent() {
             </div>
           </>
         )}
+        {isDeliveryMode && deliveryFee > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 12, fontSize: 14, color: "#888" }}>
+            <span>Delivery</span><span>₹{deliveryFee}</span>
+          </div>
+        )}
+        {isDeliveryMode && deliveryFee === 0 && website.deliveryFee > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 12, fontSize: 14, color: "#16a34a", fontWeight: 700 }}>
+            <span>Delivery</span><span>FREE</span>
+          </div>
+        )}
         <div style={{ display: "flex", justifyContent: "space-between", marginTop: bogoSavings > 0 ? 10 : 20, paddingTop: 16, borderTop: "2px solid #1a1a2e", fontSize: 18, fontWeight: 800 }}>
-          <span>Total</span><span>₹{displayTotal}</span>
+          <span>Total</span><span>₹{displayTotal + (isDeliveryMode ? deliveryFee : 0)}</span>
         </div>
-        <button onClick={submitCart} className="tap-btn" style={{ width: "100%", marginTop: 20, padding: 16, borderRadius: 14, border: "none", background: "#e8a33d", color: "#1a1a2e", fontSize: 16, fontWeight: 700, cursor: "pointer" }}>
-          {activeOrders.length > 0 ? "Add to Order" : (orderType === "takeaway" ? "Place Takeaway Order" : "Place Order")}
+
+        {/* Delivery asks for contact and address only HERE, at the end. Asking
+            before someone has decided what they want is the fastest way to lose
+            them. */}
+        {isDeliveryMode && (
+          <div style={{ marginTop: 22 }}>
+            {freeDeliveryShortfall > 0 && (
+              <div style={{ background: "#fef3c7", border: "1px solid #fde68a", color: "#92400e", padding: 12, borderRadius: 12, fontSize: 13, marginBottom: 16 }}>
+                Add ₹{freeDeliveryShortfall} more for free delivery
+              </div>
+            )}
+
+            <div style={{ fontSize: 15, fontWeight: 800, color: "#1a1a2e", marginBottom: 12 }}>Where should we deliver?</div>
+
+            {[
+              { key: "name", label: "Your name", placeholder: "Asha Kumar", type: "text" },
+              { key: "phone", label: "Phone number", placeholder: "98765 43210", type: "tel" },
+              { key: "address", label: "Delivery address", placeholder: "Flat 4B, 12 Hill Road, Bandra West", type: "text" },
+              { key: "landmark", label: "Landmark (optional)", placeholder: "Opposite the bakery", type: "text" },
+            ].map((f) => (
+              <div key={f.key} style={{ marginBottom: 12 }}>
+                <label style={{ fontSize: 12, fontWeight: 700, color: "#888", display: "block", marginBottom: 5 }}>{f.label}</label>
+                <input
+                  type={f.type}
+                  value={deliveryForm[f.key]}
+                  placeholder={f.placeholder}
+                  onChange={(e) => {
+                    setDeliveryForm((prev) => ({ ...prev, [f.key]: e.target.value }));
+                    if (deliveryErrors[f.key]) setDeliveryErrors((prev) => ({ ...prev, [f.key]: undefined }));
+                  }}
+                  style={{
+                    width: "100%", padding: "13px 14px", fontSize: 15, borderRadius: 12, boxSizing: "border-box",
+                    border: `1.5px solid ${deliveryErrors[f.key] ? "#dc2626" : "#e6e1d6"}`,
+                    background: "#fff", fontFamily: "inherit",
+                  }}
+                />
+                {deliveryErrors[f.key] && (
+                  <div style={{ color: "#dc2626", fontSize: 12, marginTop: 4 }}>{deliveryErrors[f.key]}</div>
+                )}
+              </div>
+            ))}
+
+            <div style={{ fontSize: 15, fontWeight: 800, color: "#1a1a2e", margin: "20px 0 10px" }}>How would you like to pay?</div>
+            <div style={{ display: "grid", gap: 8 }}>
+              {[
+                { key: "cod", label: "Cash on delivery", hint: "Pay the rider when your food arrives", on: website.acceptsCod },
+                { key: "upi", label: "UPI on delivery", hint: "Scan and pay at the door", on: website.acceptsUpi },
+              ].filter((o) => o.on).map((o) => (
+                <button key={o.key} onClick={() => setPayMethod(o.key)} className="tap-btn"
+                  style={{
+                    textAlign: "left", padding: 14, borderRadius: 12, cursor: "pointer", fontFamily: "inherit",
+                    border: payMethod === o.key ? "2px solid #1a1a2e" : "1.5px solid #e6e1d6",
+                    background: payMethod === o.key ? "#faf8f5" : "#fff",
+                  }}>
+                  <div style={{ fontSize: 14.5, fontWeight: 700, color: "#1a1a2e" }}>{o.label}</div>
+                  <div style={{ fontSize: 12.5, color: "#888", marginTop: 2 }}>{o.hint}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {orderingBlocked && (
+          <div style={{ background: "#fef2f2", border: "1px solid #fecaca", color: "#b91c1c", padding: 14, borderRadius: 12, fontSize: 13.5, marginTop: 18 }}>
+            {blockedMessage(orderingBlocked, { website, subtotal: displayTotal })}
+          </div>
+        )}
+
+        <button onClick={submitCart} disabled={!!orderingBlocked} className="tap-btn"
+          style={{
+            width: "100%", marginTop: 20, padding: 16, borderRadius: 14, border: "none",
+            background: orderingBlocked ? "#d6d0c4" : "#e8a33d",
+            color: "#1a1a2e", fontSize: 16, fontWeight: 700,
+            cursor: orderingBlocked ? "not-allowed" : "pointer",
+          }}>
+          {isDeliveryMode
+            ? `Place delivery order · ₹${displayTotal + deliveryFee}`
+            : activeOrders.length > 0 ? "Add to Order" : (orderType === "takeaway" ? "Place Takeaway Order" : "Place Order")}
         </button>
       </div>
     </div>
   ) : null;
 
-  // ---------- Invalid QR guard ----------
+  // ---------- Delivery order placed ----------
+  if (screen === "deliveryPlaced") {
+    const placed = allOrdersRaw.find((o) => o.id === placedOrderId);
+    const stage = placed?.status || "pending";
+    const steps = [
+      { key: "pending", label: "Sent to the restaurant", done: true },
+      { key: "confirmed", label: "Confirmed", done: ["confirmed", "preparing", "ready", "served", "billed", "paid"].includes(stage) },
+      { key: "preparing", label: "Being cooked", done: ["preparing", "ready", "served", "billed", "paid"].includes(stage) },
+      { key: "ready", label: "Out for delivery", done: ["ready", "served", "billed", "paid"].includes(stage) },
+    ];
+    return (
+      <div style={{ minHeight: "100vh", background: "#faf8f5", padding: "40px 20px", fontFamily: "system-ui, sans-serif" }}>
+        <div style={{ maxWidth: 460, margin: "0 auto", textAlign: "center" }}>
+          <div style={{ fontSize: 52, marginBottom: 14 }}>🛵</div>
+          <h1 style={{ fontSize: 24, fontWeight: 800, color: "#1a1a2e", margin: "0 0 8px" }}>Order placed</h1>
+          <p style={{ color: "#6b6b7b", fontSize: 14.5, lineHeight: 1.6, margin: "0 0 26px" }}>
+            {profile?.name || "The restaurant"} has your order and will confirm it shortly.
+            {website.deliveryEtaMinutes ? ` Delivery usually takes about ${website.deliveryEtaMinutes} minutes.` : ""}
+          </p>
+
+          <div style={{ background: "#fff", border: "1px solid #e6e1d6", borderRadius: 16, padding: 20, textAlign: "left", marginBottom: 20 }}>
+            {steps.map((st, i) => (
+              <div key={st.key} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 0", opacity: st.done ? 1 : 0.4 }}>
+                <div style={{
+                  width: 24, height: 24, borderRadius: "50%", flexShrink: 0, display: "grid", placeItems: "center",
+                  background: st.done ? "#16a34a" : "#e6e1d6", color: "#fff", fontSize: 13, fontWeight: 800,
+                }}>{st.done ? "✓" : i + 1}</div>
+                <span style={{ fontSize: 14.5, fontWeight: st.done ? 700 : 500, color: "#1a1a2e" }}>{st.label}</span>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ background: "#fff", border: "1px solid #e6e1d6", borderRadius: 16, padding: 18, textAlign: "left", marginBottom: 22 }}>
+            <div style={{ fontSize: 11.5, fontWeight: 800, color: "#888", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>Delivering to</div>
+            <div style={{ fontSize: 14, color: "#1a1a2e", lineHeight: 1.6 }}>
+              <strong>{deliveryForm.name}</strong><br />
+              {deliveryForm.address}{deliveryForm.landmark ? ` · ${deliveryForm.landmark}` : ""}<br />
+              <span style={{ color: "#888" }}>{deliveryForm.phone}</span>
+            </div>
+            <div style={{ fontSize: 12.5, color: "#888", marginTop: 10, paddingTop: 10, borderTop: "1px solid #f0ebe3" }}>
+              {payMethod === "cod" ? "Paying cash on delivery" : "Paying by UPI on delivery"}
+            </div>
+          </div>
+
+          <button onClick={() => { setScreen("menu"); setPlacedOrderId(null); }} className="tap-btn"
+            style={{ padding: "13px 24px", borderRadius: 12, border: "1px solid #e6e1d6", background: "#fff", color: "#1a1a2e", fontWeight: 700, fontSize: 14.5, cursor: "pointer" }}>
+            Order something else
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ---------- No restaurant in the link ----------
   if (!restaurantId) {
     return (
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, background: "#faf8f5" }}>
         <div style={{ textAlign: "center" }}>
           <div style={{ fontSize: 48, marginBottom: 16 }}>⚠️</div>
-          <h2 style={{ fontSize: 20, fontWeight: 700, color: "#1a1a2e" }}>Invalid QR Code</h2>
-          <p style={{ color: "#6b6b7b", marginTop: 8 }}>Please scan a valid table QR code.</p>
+          <h2 style={{ fontSize: 20, fontWeight: 700, color: "#1a1a2e" }}>
+            {isDeliveryMode ? "Restaurant not found" : "Invalid QR Code"}
+          </h2>
+          <p style={{ color: "#6b6b7b", marginTop: 8 }}>
+            {isDeliveryMode
+              ? "This ordering link looks incomplete. Please use the link from the restaurant's page."
+              : "Please scan a valid table QR code."}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // ---------- Closed, or not taking online orders ----------
+  if (isDeliveryMode && !website.enabled) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, background: "#faf8f5" }}>
+        <div style={{ textAlign: "center", maxWidth: 380 }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>🌙</div>
+          <h2 style={{ fontSize: 20, fontWeight: 700, color: "#1a1a2e" }}>{profile?.name || "This restaurant"}</h2>
+          <p style={{ color: "#6b6b7b", marginTop: 8, lineHeight: 1.6 }}>
+            Online ordering isn&apos;t available here yet. You&apos;re very welcome to visit us in person.
+          </p>
         </div>
       </div>
     );
