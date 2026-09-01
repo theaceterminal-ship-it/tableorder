@@ -17,6 +17,11 @@ import { computeBundleDiscounts, computeBillTotals } from "@/lib/pricing";
 import { can } from "@/lib/tenancy";
 import { fetchMasterMenu, seedOutletFromMaster } from "@/lib/brand";
 import {
+  startCooking as kdsStart, markReady as kdsReady, adjustEta as kdsAdjustEta,
+  returnToQueue as kdsReturn, autoStartNext, ETA_PRESETS, DEFAULT_ETA,
+  MAX_CONCURRENT_PREPARING,
+} from "@/lib/kitchen";
+import {
   isToday, filterRangeStart, receptionOrderWindowStart,
   withItemIds, mergeItemLines, revenueOrders, soldQtyByItem,
 } from "@/lib/orders";
@@ -499,6 +504,9 @@ function ReceptionPage() {
   // Stable primitive keys for effect dependencies — see the note below.
   const brandOutletKey = (brand?.outletIds || []).join(",");
   const accessOutletKey = access.outletIds.join(",");
+  const [ordersLoaded, setOrdersLoaded] = useState(false); // gates auto-start until real data lands
+  const kdsFailedRef = useRef(new Set());                  // orders whose auto-start was permanently denied
+  const [kdsError, setKdsError] = useState("");
   const [seeding, setSeeding] = useState(false);
   const [seedResult, setSeedResult] = useState(null);
 
@@ -561,7 +569,10 @@ function ReceptionPage() {
       where("createdAt", ">=", receptionOrderWindowStart()),
       orderBy("createdAt", "asc"),
     );
-    const unsub = onSnapshot(q, (snap) => setOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
+    const unsub = onSnapshot(q, (snap) => {
+      setOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      setOrdersLoaded(true);
+    });
     return () => unsub();
   }, [restaurantId]);
 
@@ -2520,6 +2531,20 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
   // A read-only mirror of the kitchen board. Deliberately read-only: cooking
   // times are the kitchen's call, and two people advancing the same ticket from
   // two screens is how orders get marked ready before they are.
+  // Runs a batch of kitchen transitions and surfaces the first real failure.
+  // A transition that returns false lost a race to another screen, which is a
+  // normal outcome and not worth telling anyone about.
+  async function runKds(actions) {
+    setKdsError("");
+    try {
+      await Promise.all(actions.map((fn) => fn()));
+    } catch (e) {
+      setKdsError(e?.code === "permission-denied"
+        ? "You do not have permission to change orders at this outlet."
+        : `Could not update the kitchen (${e?.code || e.message}).`);
+    }
+  }
+
   const renderKitchenView = () => {
     const cols = [
       { key: "confirmed", label: "Waiting to start", tint: "#fef3c7", ink: "#92400e", list: orders.filter((o) => o.status === "confirmed") },
@@ -2534,10 +2559,16 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
             Open full kitchen screen ↗
           </a>
         </div>
-        <p style={{ fontSize: 13, color: "var(--text-secondary, #6b6b7b)", marginTop: 0, marginBottom: 20 }}>
-          A live view of what the kitchen is working on. Read-only — timings are set on the
-          kitchen screen so two people cannot advance the same ticket at once.
+        <p style={{ fontSize: 13, color: "var(--text-secondary, #6b6b7b)", marginTop: 0, marginBottom: 16 }}>
+          Live from the kitchen, and you can drive it from here. Orders start cooking on their
+          own while fewer than {MAX_CONCURRENT_PREPARING} are on the stove; below you can start
+          one early, adjust its timer, or mark it ready.
         </p>
+        {kdsError && (
+          <div style={{ background: "#fef2f2", border: "1px solid #fecaca", color: "#b91c1c", padding: 12, borderRadius: 10, marginBottom: 14, fontSize: 13 }}>
+            {kdsError}
+          </div>
+        )}
         <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3, 1fr)", gap: 14 }}>
           {cols.map((c) => (
             <div key={c.key}>
@@ -2565,6 +2596,36 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                   {g.rep.status === "preparing" && getCountdown(g.rep) && (
                     <div style={{ marginTop: 8, fontFamily: "monospace", fontSize: 15, color: "#C1440E", fontWeight: 700 }}>⏱ {getCountdown(g.rep)}</div>
                   )}
+
+                  {/* Actions apply to every order in a merged party, so one
+                      click moves the whole table rather than half of it. */}
+                  {c.key === "confirmed" && (
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+                      {ETA_PRESETS.map((m) => (
+                        <button key={m} className="btn btn-sm" style={{ flex: "1 1 52px", padding: "6px 8px", fontSize: 12 }}
+                          onClick={() => runKds(g.orders.map((o) => () => kdsStart(restaurantId, o.id, m)))}>
+                          {m}m
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {c.key === "preparing" && (
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+                      <button className="btn btn-sm" style={{ padding: "6px 10px", fontSize: 12 }}
+                        onClick={() => runKds(g.orders.map((o) => () => kdsAdjustEta(restaurantId, o.id, o.etaMinutes, -5)))}>−5m</button>
+                      <button className="btn btn-sm" style={{ padding: "6px 10px", fontSize: 12 }}
+                        onClick={() => runKds(g.orders.map((o) => () => kdsAdjustEta(restaurantId, o.id, o.etaMinutes, 5)))}>+5m</button>
+                      <button className="btn btn-sm btn-primary" style={{ flex: 1, padding: "6px 10px", fontSize: 12 }}
+                        onClick={() => runKds(g.orders.map((o) => () => kdsReady(restaurantId, o.id)))}>Mark ready</button>
+                      <button className="btn btn-sm" style={{ padding: "6px 10px", fontSize: 12, color: "#888" }}
+                        title="Started by mistake — put it back in the queue"
+                        onClick={() => runKds(g.orders.map((o) => () => kdsReturn(restaurantId, o.id)))}>↩</button>
+                    </div>
+                  )}
+                  {c.key === "ready" && (
+                    <button className="btn btn-sm btn-success" style={{ width: "100%", marginTop: 10, padding: "6px 10px", fontSize: 12 }}
+                      onClick={() => g.orders.forEach((o) => markServed(o.id))}>Mark as Served</button>
+                  )}
                 </div>
               ))}
             </div>
@@ -2573,6 +2634,36 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
       </div>
     );
   };
+
+  // Auto-start also runs here, not only on the kitchen screen.
+  //
+  // It used to live solely in /kitchen, so if nobody had that screen open —
+  // which is most of the time in a small restaurant, where the manager is
+  // watching from reception — orders simply sat in "Waiting to start" and the
+  // queue never drained. Both screens now drive it, and startCooking is a
+  // transaction, so when both are open only one wins and the other is a no-op.
+  useEffect(() => {
+    if (!restaurantId || !ordersLoaded) return;
+    const confirmedList = orders.filter((o) => o.status === "confirmed");
+    const preparingCount = orders.filter((o) => o.status === "preparing").length;
+    if (confirmedList.length === 0) return;
+    autoStartNext(restaurantId, {
+      confirmed: confirmedList,
+      preparingCount,
+      skipIds: [...kdsFailedRef.current],
+    }).catch((e) => {
+      // A denial will not fix itself; retrying it forever just hammers
+      // Firestore and fills the console.
+      if (["permission-denied", "not-found", "invalid-argument"].includes(e?.code)) {
+        const front = confirmedList[0];
+        if (front) kdsFailedRef.current.add(front.id);
+      }
+      console.error("Auto-start from POS failed:", e?.code || e.message);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restaurantId, ordersLoaded,
+      orders.filter((o) => o.status === "preparing").length,
+      orders.filter((o) => o.status === "confirmed")[0]?.id]);
 
   // === RENDER: DASHBOARD ===
   const renderDashboard = () => {
