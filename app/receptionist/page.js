@@ -23,7 +23,7 @@ import {
 } from "@/lib/kitchen";
 import {
   isToday, filterRangeStart, receptionOrderWindowStart,
-  withItemIds, mergeItemLines, revenueOrders, soldQtyByItem,
+  withItemIds, mergeItemLines, revenueOrders, soldQtyByItem, collapseBillSiblings,
 } from "@/lib/orders";
 
 const DEFAULT_CATEGORIES = ["Starters", "Mains", "Breads & Rice", "Continental", "Beverages", "Desserts"];
@@ -2038,7 +2038,9 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
   // billed ones) in the currently selected date range.
   function exportOrdersHistoryCSV(filterKey) {
     const start = filterRangeStart(filterKey);
-    const list = orders.filter((o) => o.createdAt >= start).sort((a, b) => b.createdAt - a.createdAt);
+    // One row per bill, not one per table. See collapseBillSiblings.
+    const list = collapseBillSiblings(orders.filter((o) => o.createdAt >= start))
+      .sort((a, b) => b.createdAt - a.createdAt);
     const statusCounts = {};
     list.forEach((o) => { statusCounts[o.status] = (statusCounts[o.status] || 0) + 1; });
     const rows = [
@@ -2064,7 +2066,9 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
 
   function printOrdersHistoryReport(filterKey) {
     const start = filterRangeStart(filterKey);
-    const list = orders.filter((o) => o.createdAt >= start).sort((a, b) => b.createdAt - a.createdAt);
+    // One row per bill, not one per table. See collapseBillSiblings.
+    const list = collapseBillSiblings(orders.filter((o) => o.createdAt >= start))
+      .sort((a, b) => b.createdAt - a.createdAt);
     const statusColors = { pending: "#f59e0b", confirmed: "#3b82f6", preparing: "#3b82f6", ready: "#3b82f6", served: "#6b7280", bill_requested: "#e8a33d", billed: "#8b5cf6", paid: "#16a34a", cancelled: "#dc2626", declined: "#dc2626" };
     const statusCounts = {};
     list.forEach((o) => { statusCounts[o.status] = (statusCounts[o.status] || 0) + 1; });
@@ -2344,7 +2348,9 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
 
   function renderOrdersHistory() {
     const start = filterRangeStart(analyticsFilter);
-    const list = orders.filter((o) => o.createdAt >= start).sort((a, b) => b.createdAt - a.createdAt);
+    // One row per bill, not one per table. See collapseBillSiblings.
+    const list = collapseBillSiblings(orders.filter((o) => o.createdAt >= start))
+      .sort((a, b) => b.createdAt - a.createdAt);
     return (
       <div>
         <button onClick={() => setDashboardView("main")} style={{ background: "none", border: "none", color: "#888", cursor: "pointer", fontSize: 13, fontWeight: 600, marginBottom: 16 }}>← Back to dashboard</button>
