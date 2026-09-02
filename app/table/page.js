@@ -10,6 +10,7 @@ import { mergeItemLines, tableSessionWindowStart } from "@/lib/orders";
 import {
   ORDER_TYPES, DELIVERY_TABLE, validateDeliveryDetails, normalizePhone,
   deliveryTimeline, deliveryStage, isDeliveryComplete, DELIVERY_STAGES,
+  deliveryOrderErrorMessage,
 } from "@/lib/order-types";
 import PhoneVerification from "@/components/PhoneVerification";
 import { isOtpEnabled } from "@/lib/phone-auth";
@@ -1183,32 +1184,43 @@ export function TableContent({ mode = "table" }) {
       // are publicly readable so a customer can track their own, and a guessable
       // id must not become a lookup for somebody's home address.
       const orderRef = doc(collection(db, "restaurants", restaurantId, "orders"));
-      await setDoc(doc(db, "restaurants", restaurantId, "deliveryDetails", orderRef.id), {
-        name: deliveryForm.name.trim(),
-        phone: normalizePhone(deliveryForm.phone),
-        // The rule checks this against request.auth.token.phone_number, so it
-        // has to be the E.164 form rather than whatever was typed.
-        phoneE164: phoneVerified ? toE164(deliveryForm.phone) : "",
-        address: deliveryForm.address.trim(),
-        landmark: deliveryForm.landmark.trim(),
-        paymentMethod: payMethod,
-        createdAt: Date.now(),
-      });
-      await setDoc(orderRef, {
-        table: DELIVERY_TABLE,
-        items,
-        status: "pending",
-        orderType: ORDER_TYPES.DELIVERY,
-        isVIP: false,
-        etaMinutes: null,
-        preparingAt: null,
-        // The fee quoted on this screen, recorded at the moment it was quoted.
-        // Without it the bill would be recomputed later against settings that
-        // may have changed, and the customer would be charged something other
-        // than the total they agreed to.
-        deliveryFee,
-        createdAt: Date.now(),
-      });
+
+      // Wrapped, like the dine-in path below it. Without this, a refused write
+      // became an unhandled rejection and the customer got a raw framework
+      // error page instead of a sentence telling them what went wrong —
+      // mid-checkout, with a full cart, which is the worst possible moment to
+      // show somebody a stack trace.
+      try {
+        await setDoc(doc(db, "restaurants", restaurantId, "deliveryDetails", orderRef.id), {
+          name: deliveryForm.name.trim(),
+          phone: normalizePhone(deliveryForm.phone),
+          // The rule checks this against request.auth.token.phone_number, so it
+          // has to be the E.164 form rather than whatever was typed.
+          phoneE164: phoneVerified ? toE164(deliveryForm.phone) : "",
+          address: deliveryForm.address.trim(),
+          landmark: deliveryForm.landmark.trim(),
+          paymentMethod: payMethod,
+          createdAt: Date.now(),
+        });
+        await setDoc(orderRef, {
+          table: DELIVERY_TABLE,
+          items,
+          status: "pending",
+          orderType: ORDER_TYPES.DELIVERY,
+          isVIP: false,
+          etaMinutes: null,
+          preparingAt: null,
+          // The fee quoted on this screen, recorded at the moment it was quoted.
+          // Without it the bill would be recomputed later against settings that
+          // may have changed, and the customer would be charged something other
+          // than the total they agreed to.
+          deliveryFee,
+          createdAt: Date.now(),
+        });
+      } catch (e) {
+        setOrderError(deliveryOrderErrorMessage(e));
+        return;
+      }
 
       // Kept so this device can follow its own order after a refresh. It is an
       // id, not personal data — the address stays behind the staff-only rule.
