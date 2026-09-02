@@ -6,8 +6,9 @@ import { useRouter } from "next/navigation";
 import CrmSection from "./sections/CrmSection";
 import OnlineOrderingSection from "./sections/OnlineOrderingSection";
 import {
-  orderTypeMeta, isDelivery, formatDeliveryAddress,
+  orderTypeMeta, isDelivery, formatDeliveryAddress, orderDestinationLabel,
   nextDeliveryAction, deliveryStage, validateRider, DELIVERY_STAGES,
+  isInFlightDelivery,
 } from "@/lib/order-types";
 import {
   issueTableToken, openTableSession, closeTableSession, openSessionsFor, closeSessionsFor,
@@ -765,10 +766,17 @@ function ReceptionPage() {
 
   // === computed ===
   const pending = orders.filter((o) => o.status === "pending");
-  const active = orders.filter((o) => ["confirmed", "preparing", "ready"].includes(o.status));
+  // A delivery handed to a rider is billed but still in flight. It stays in
+  // this list until it is marked delivered -- otherwise generating its bill at
+  // dispatch would drop it out of "In Kitchen" and put "Mark delivered" out of
+  // reach, stranding the order between the two screens.
+  const inFlightDelivery = isInFlightDelivery;
+  const active = orders.filter((o) => ["confirmed", "preparing", "ready"].includes(o.status) || inFlightDelivery(o));
   const served = orders.filter((o) => o.status === "served");
   const billRequested = orders.filter((o) => o.status === "bill_requested");
-  const billed = orders.filter((o) => o.status === "billed");
+  // ...and is therefore not shown as an ordinary billed table awaiting payment,
+  // which would list it twice and invite someone to settle it before it lands.
+  const billed = orders.filter((o) => o.status === "billed" && !inFlightDelivery(o));
   const pendingWaiterCalls = waiterCalls.filter((c) => c.status === "pending");
 
   const ordersToday = orders.filter((o) => isToday(o.createdAt));
@@ -1022,12 +1030,16 @@ function ReceptionPage() {
     const ordersToBill = ordersForBilling(o);
     const rawItems = mergeItemLines(ordersToBill.flatMap((ord) => ord.items));
     const items = normalizedItems(rawItems);
+    // The fee recorded when the customer was quoted it, not one recomputed
+    // now against settings that may since have changed.
+    const deliveryFee = ordersToBill.reduce((sum, ord) => sum + (ord.deliveryFee || 0), 0);
     const bill = computeBillTotals({
       items,
       menuItems,
       bundleRules,
       taxPercent: billing.taxPercent,
       servicePercent: billing.servicePercent,
+      deliveryFee,
     });
     const selfPayOn = !!billing.upiSelfPayEnabled && !!billing.upiId;
     const upiLink = withQr && selfPayOn
@@ -1056,6 +1068,7 @@ function ReceptionPage() {
       billDiscountTotal: bill.discountTotal,
       billTaxPercent: bill.taxPercent, billTaxAmount: bill.taxAmount,
       billServicePercent: bill.servicePercent, billServiceAmount: bill.serviceAmount,
+      billDeliveryFee: bill.deliveryFee,
       billTotal: bill.grandTotal,
       paymentQrUrl: upiLink ? `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(upiLink)}` : null,
       upiPayLink: upiLink || null,
@@ -1146,6 +1159,23 @@ function ReceptionPage() {
     if (Object.keys(errors).length > 0) { setRiderErrors(errors); return; }
     const o = dispatchOrder;
     try {
+      // The bill is generated HERE, as the food leaves, for two reasons: it is
+      // the last moment the contents can still change, and a delivery needs a
+      // printable bill to go in the bag.
+      //
+      // This was the bug: marking an order delivered used to write a bare
+      // "paid" status and nothing else. No billId, no billTotal, no customer
+      // record -- so the order vanished from sales (which sums billTotal), from
+      // the CRM, and there was never a bill to print.
+      const details = deliveryDetails[o.id];
+      if (!o.billId) {
+        await generateBill(o, false, {
+          name: details?.name || "",
+          phone: details?.phone || "",
+          // Already chosen at checkout, so billing does not ask again.
+          paymentMethod: details?.paymentMethod === "upi" ? "upi" : "cash",
+        });
+      }
       await updateDoc(doc(db, "restaurants", restaurantId, "orders", o.id), {
         dispatchedAt: Date.now(),
         riderName: riderForm.name.trim(),
@@ -1167,9 +1197,21 @@ function ReceptionPage() {
   async function markDelivered(o) {
     const details = deliveryDetails[o.id];
     const paidAtDoor = (details?.paymentMethod || "cod") !== "unpaid";
+
+    // A bill should already exist from dispatch. This covers an order dispatched
+    // before that change shipped, so it still lands in sales rather than being
+    // marked paid with nothing to count.
+    if (!o.billId) {
+      await generateBill(o, false, {
+        name: details?.name || "",
+        phone: details?.phone || "",
+        paymentMethod: details?.paymentMethod === "upi" ? "upi" : "cash",
+      });
+    }
+
     await updateDoc(doc(db, "restaurants", restaurantId, "orders", o.id), {
       deliveredAt: Date.now(),
-      status: paidAtDoor ? "paid" : o.status,
+      status: paidAtDoor ? "paid" : "billed",
       ...(paidAtDoor ? { paymentMethod: details?.paymentMethod === "upi" ? "upi" : "cash" } : {}),
     });
   }
@@ -1235,7 +1277,7 @@ function ReceptionPage() {
         ${profile?.logoUrl ? `<div style="text-align:center;margin-bottom:10px;"><img src="${profile.logoUrl}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;" /></div>` : ""}
         <h2>${profile?.name || "Cabadra"}</h2>
         <div class="sub">${profile?.tagline || ""}</div>
-        <div class="sub">Table ${o.table} - ${new Date(o.createdAt).toLocaleString()}</div>
+        <div class="sub">${orderDestinationLabel(o)} - ${new Date(o.createdAt).toLocaleString()}</div>
         ${customerHtml}
         ${paymentHtml}
         <div class="line"></div>
@@ -1245,6 +1287,7 @@ function ReceptionPage() {
         ${discountsHtml}
         ${o.billTaxAmount > 0 ? `<div class="row"><span>Tax (${o.billTaxPercent}%)</span><span>Rs.${o.billTaxAmount}</span></div>` : ""}
         ${o.billServiceAmount > 0 ? `<div class="row"><span>Service (${o.billServicePercent}%)</span><span>Rs.${o.billServiceAmount}</span></div>` : ""}
+        ${o.billDeliveryFee > 0 ? `<div class="row"><span>Delivery</span><span>Rs.${o.billDeliveryFee}</span></div>` : ""}
         <div class="line"></div>
         <div class="row total"><span>Total</span><span>Rs.${o.billTotal}</span></div>
         ${qrHtml}
@@ -2608,10 +2651,21 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                         🛵 Hand to rider
                       </button>
                     ) : nextDeliveryAction(g.rep) === "deliver" ? (
-                      <button className="btn btn-sm btn-success" style={{ width: "100%" }}
-                        onClick={() => markDelivered(g.rep)}>
-                        ✓ Mark delivered
-                      </button>
+                      <>
+                        {/* The bill exists from the moment the rider took it,
+                            so it can be reprinted for the bag or the customer
+                            without waiting for the order to be settled. */}
+                        {g.rep.billId && (
+                          <button className="btn btn-sm btn-ghost" style={{ flex: 1 }}
+                            onClick={() => printBill(g.rep)}>
+                            🖨 Bill
+                          </button>
+                        )}
+                        <button className="btn btn-sm btn-success" style={{ flex: 2 }}
+                          onClick={() => markDelivered(g.rep)}>
+                          ✓ Mark delivered
+                        </button>
+                      </>
                     ) : g.orders.some((o) => o.status === "ready") ? (
                       <button className="btn btn-sm btn-success" style={{ width: "100%" }}
                         onClick={() => g.orders.filter((o) => o.status === "ready").forEach((o) => markServed(o.id))}>

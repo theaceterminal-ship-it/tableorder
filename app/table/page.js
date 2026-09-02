@@ -1202,6 +1202,11 @@ export function TableContent({ mode = "table" }) {
         isVIP: false,
         etaMinutes: null,
         preparingAt: null,
+        // The fee quoted on this screen, recorded at the moment it was quoted.
+        // Without it the bill would be recomputed later against settings that
+        // may have changed, and the customer would be charged something other
+        // than the total they agreed to.
+        deliveryFee,
         createdAt: Date.now(),
       });
 

@@ -148,3 +148,36 @@ describe("the customer's address", () => {
       { name: "X", phone: "9876543210" }));
   });
 });
+
+describe("the quoted delivery fee", () => {
+  // The fee is recorded on the order so the bill charges what the customer
+  // actually agreed to. Only its shape is enforced -- the correct amount
+  // depends on the subtotal and the free-delivery threshold, which is more
+  // arithmetic than a rule can do cheaply.
+  async function placeWithFee(fee) {
+    const db = anon();
+    await setDoc(doc(db, "restaurants", OUTLET, "deliveryDetails", ORDER_ID), details);
+    return setDoc(doc(db, "restaurants", OUTLET, "orders", ORDER_ID), deliveryOrder({ deliveryFee: fee }));
+  }
+
+  it("accepts a sane fee", async () => {
+    await assertSucceeds(placeWithFee(40));
+  });
+
+  it("accepts no fee at all", async () => {
+    await assertSucceeds(placeWithFee(0));
+  });
+
+  it("refuses a negative fee", async () => {
+    // Otherwise a customer could pay themselves to take delivery.
+    await assertFails(placeWithFee(-500));
+  });
+
+  it("refuses an absurd fee", async () => {
+    await assertFails(placeWithFee(999999));
+  });
+
+  it("refuses a fee that is not a number", async () => {
+    await assertFails(placeWithFee("40"));
+  });
+});

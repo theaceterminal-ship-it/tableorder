@@ -261,8 +261,24 @@ service cloud.firestore {
     function dinerOrderFieldsOnly() {
       return request.resource.data.keys().hasOnly([
         'table', 'items', 'status', 'orderType', 'isVIP',
-        'etaMinutes', 'preparingAt', 'createdAt', 'notes', 'tableToken'
+        'etaMinutes', 'preparingAt', 'createdAt', 'notes', 'tableToken',
+        'deliveryFee'
       ]);
+    }
+
+    // The fee the customer was quoted, recorded so the bill charges the total
+    // they actually agreed to rather than one recomputed later.
+    //
+    // Only the shape is enforced here, not the amount: the correct fee depends
+    // on the subtotal and the outlet's free-delivery threshold, which is more
+    // arithmetic than a rule can do cheaply. A customer could therefore quote
+    // themselves a smaller fee -- reception sees the figure on the bill before
+    // the food goes out, which is the check that catches it.
+    function deliveryFeeWellFormed() {
+      return !('deliveryFee' in request.resource.data)
+        || (request.resource.data.deliveryFee is int
+            && request.resource.data.deliveryFee >= 0
+            && request.resource.data.deliveryFee <= 10000);
     }
 
     // =====================================================================
@@ -550,6 +566,7 @@ service cloud.firestore {
 
         allow create: if canWorkOutlet(outletId)
                       || (dinerOrderFieldsOnly()
+                          && deliveryFeeWellFormed()
                           && request.resource.data.status in ['pending', 'bill_requested']
                           && request.resource.data.items.size() > 0
                           && (isDeliveryOrder()
