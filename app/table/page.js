@@ -11,6 +11,9 @@ import {
   ORDER_TYPES, DELIVERY_TABLE, validateDeliveryDetails, normalizePhone,
   deliveryTimeline, deliveryStage, isDeliveryComplete, DELIVERY_STAGES,
 } from "@/lib/order-types";
+import PhoneVerification from "@/components/PhoneVerification";
+import { isOtpEnabled } from "@/lib/phone-auth";
+import { toE164 } from "@/lib/phone";
 import { isSessionOpen, BLOCKED_MESSAGES } from "@/lib/table-session";
 import {
   DEFAULT_WEBSITE, orderingBlockedReason, blockedMessage,
@@ -676,6 +679,9 @@ export function TableContent({ mode = "table" }) {
   const [tableNo, setTableNo] = useState(tableParam ? parseInt(tableParam) : null);
   const [deliveryForm, setDeliveryForm] = useState({ name: "", phone: "", address: "", landmark: "" });
   const [deliveryErrors, setDeliveryErrors] = useState({});
+  // Proven, not merely typed. Reset by the component itself whenever the
+  // number is edited, so it cannot go stale.
+  const [phoneVerified, setPhoneVerified] = useState(false);
   const [payMethod, setPayMethod] = useState("cod");
   const [placedOrderId, setPlacedOrderId] = useState(null);
   const [trackedOrder, setTrackedOrder] = useState(null);
@@ -740,7 +746,14 @@ export function TableContent({ mode = "table" }) {
       if (snap.exists()) {
         const data = snap.data();
         setGoogleReviewLink(data.googleReviewLink || "");
-        setWebsite({ ...DEFAULT_WEBSITE, ...(data.website || {}), deliveryEnabled: !!data.deliveryEnabled });
+        setWebsite({
+          ...DEFAULT_WEBSITE,
+          ...(data.website || {}),
+          deliveryEnabled: !!data.deliveryEnabled,
+          // Lives at the root of info/settings because that is where the
+          // security rule reads it from.
+          requirePhoneVerification: !!data.requirePhoneVerification,
+        });
       }
     });
     return () => unsub();
@@ -1155,6 +1168,14 @@ export function TableContent({ mode = "table" }) {
       const errors = validateDeliveryDetails(deliveryForm);
       if (Object.keys(errors).length > 0) { setDeliveryErrors(errors); return; }
 
+      // Refusing here is a courtesy, not the control. The security rule is what
+      // actually enforces this — it compares the number against the token
+      // Firebase issued, which no client can fake.
+      if (verificationRequired && !phoneVerified) {
+        setDeliveryErrors({ phone: "Please verify your phone number first." });
+        return;
+      }
+
       // The order id is generated up front so the address can be written FIRST,
       // under that same id. Security rules refuse a delivery order whose details
       // do not already exist, which is what stops an order arriving with nowhere
@@ -1165,6 +1186,9 @@ export function TableContent({ mode = "table" }) {
       await setDoc(doc(db, "restaurants", restaurantId, "deliveryDetails", orderRef.id), {
         name: deliveryForm.name.trim(),
         phone: normalizePhone(deliveryForm.phone),
+        // The rule checks this against request.auth.token.phone_number, so it
+        // has to be the E.164 form rather than whatever was typed.
+        phoneE164: phoneVerified ? toE164(deliveryForm.phone) : "",
         address: deliveryForm.address.trim(),
         landmark: deliveryForm.landmark.trim(),
         paymentMethod: payMethod,
@@ -1281,6 +1305,9 @@ export function TableContent({ mode = "table" }) {
   const bogoSavings = computeBogoDiscount(cartLines, menuItems)?.amount || 0;
   const displayTotal = Math.max(0, total - bogoSavings);
 
+  // Verification only applies when the outlet asked for it AND the platform
+  // switch is on, so an outlet cannot demand a code the app cannot send.
+  const verificationRequired = isDeliveryMode && isOtpEnabled() && !!website.requirePhoneVerification;
   const deliveryFee = isDeliveryMode ? deliveryFeeFor(displayTotal, website) : 0;
   const freeDeliveryShortfall = isDeliveryMode ? shortfallToFreeDelivery(displayTotal, website) : 0;
   // Checked here so the customer is told why before they fill in an address,
@@ -1465,7 +1492,7 @@ export function TableContent({ mode = "table" }) {
 
             {[
               { key: "name", label: "Your name", placeholder: "Asha Kumar", type: "text" },
-              { key: "phone", label: "Phone number", placeholder: "98765 43210", type: "tel" },
+              ...(verificationRequired ? [] : [{ key: "phone", label: "Phone number", placeholder: "98765 43210", type: "tel" }]),
               { key: "address", label: "Delivery address", placeholder: "Flat 4B, 12 Hill Road, Bandra West", type: "text" },
               { key: "landmark", label: "Landmark (optional)", placeholder: "Opposite the bakery", type: "text" },
             ].map((f) => (
@@ -1490,6 +1517,22 @@ export function TableContent({ mode = "table" }) {
                 )}
               </div>
             ))}
+
+            {/* The phone field is replaced rather than decorated when
+                verification is on: it has to own its own disabled/verified
+                states, and threading those through the generic loop above
+                would make every other field pay for it. */}
+            {verificationRequired && (
+              <PhoneVerification
+                phone={deliveryForm.phone}
+                onPhoneChange={(v) => {
+                  setDeliveryForm((prev) => ({ ...prev, phone: v }));
+                  if (deliveryErrors.phone) setDeliveryErrors((prev) => ({ ...prev, phone: undefined }));
+                }}
+                onVerifiedChange={setPhoneVerified}
+                fieldError={deliveryErrors.phone}
+              />
+            )}
 
             <div style={{ fontSize: 15, fontWeight: 800, color: "#1a1a2e", margin: "20px 0 10px" }}>How would you like to pay?</div>
             <div style={{ display: "grid", gap: 8 }}>

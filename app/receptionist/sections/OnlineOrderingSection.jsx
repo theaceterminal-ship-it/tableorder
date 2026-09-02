@@ -15,6 +15,7 @@ import {
   slugify, validateSlug, publicOrderUrl, isOpenAt, todayHoursLabel,
 } from "@/lib/website-setup";
 import { SectionHeader, labelStyle, inputStyle } from "./ui";
+import { isOtpEnabled } from "@/lib/phone-auth";
 
 function Toggle({ on, onChange, title, hint }) {
   return (
@@ -59,6 +60,8 @@ export default function OnlineOrderingSection({ outletId, restaurantName, settin
       // Mirrored to the top level because the security rule reads it there —
       // rules cannot reach into a nested map as cheaply.
       deliveryEnabled: settings?.deliveryEnabled ?? settings?.website?.deliveryEnabled ?? false,
+      requirePhoneVerification:
+        settings?.requirePhoneVerification ?? settings?.website?.requirePhoneVerification ?? false,
     });
   }, [settings]);
 
@@ -66,6 +69,9 @@ export default function OnlineOrderingSection({ outletId, restaurantName, settin
   const url = publicOrderUrl(origin, { slug: form.slug, outletId });
   const slugError = form.slug ? validateSlug(form.slug) : null;
   const openNow = isOpenAt(form.hours);
+  // Shown rather than hidden when unavailable: an outlet can express the intent
+  // now, and it starts working the moment the platform switch is flipped.
+  const otpAvailable = isOtpEnabled();
 
   const set = (patch) => setForm((p) => ({ ...p, ...patch }));
   const setDay = (day, patch) =>
@@ -81,6 +87,9 @@ export default function OnlineOrderingSection({ outletId, restaurantName, settin
         // Duplicated at the top level for the security rule. Keeping both in one
         // write means they cannot disagree.
         deliveryEnabled: !!(form.enabled && form.deliveryEnabled),
+        // Same mirroring, same reason. Tied to delivery being on, so switching
+        // delivery off cannot leave a stray requirement behind.
+        requirePhoneVerification: !!(form.deliveryEnabled && form.requirePhoneVerification),
       }, { merge: true });
       setSaved(true);
       setTimeout(() => setSaved(false), 2200);
@@ -158,6 +167,16 @@ export default function OnlineOrderingSection({ outletId, restaurantName, settin
           title="Pickup"
           hint="Customers order ahead and collect at the counter."
         />
+        {form.deliveryEnabled && (
+          <Toggle
+            on={form.requirePhoneVerification}
+            onChange={(v) => set({ requirePhoneVerification: v })}
+            title="Verify phone numbers by SMS"
+            hint={otpAvailable
+              ? "Customers confirm a code before ordering. Cuts prank orders, and lets them track their delivery after a refresh. Each SMS costs money."
+              : "Not available yet — phone sign-in has not been switched on for this deployment. You can set this now; it takes effect once it is."}
+          />
+        )}
       </div>
 
       {/* Address on the web */}

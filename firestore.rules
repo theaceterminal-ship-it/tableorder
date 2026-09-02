@@ -42,6 +42,40 @@ service cloud.firestore {
       return request.auth.uid;
     }
 
+    // -------------------------------------------------------------------
+    // Two kinds of signed-in
+    // -------------------------------------------------------------------
+    //
+    // Staff sign in with a password or Google. Diners, once phone verification
+    // is switched on, sign in with an SMS code -- and that gives them a real
+    // request.auth too. Every rule that only asked "is ANYONE signed in?" would
+    // therefore start saying yes to strangers: a diner could create a brand, or
+    // an org, and land themselves in the approvals queue as junk.
+    //
+    // So the two are kept apart by the provider that issued the token, which no
+    // client can forge. Staff-facing rules ask isStaffAuth(); the diner ones ask
+    // isVerifiedDiner().
+
+    function signInProvider() {
+      return request.auth.token.firebase.sign_in_provider;
+    }
+
+    function isStaffAuth() {
+      return signedIn() && signInProvider() != 'phone';
+    }
+
+    function isVerifiedDiner() {
+      return signedIn()
+        && signInProvider() == 'phone'
+        && 'phone_number' in request.auth.token
+        && request.auth.token.phone_number != '';
+    }
+
+    // The number Firebase itself verified -- not one the client claims.
+    function dinerPhone() {
+      return request.auth.token.phone_number;
+    }
+
     // The platform operator. Seeded by hand in the console; writable by nobody,
     // so no client can ever promote itself into approving its own subscription.
     function isPlatformAdmin() {
@@ -202,6 +236,14 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/restaurants/$(outletId)/info/settings).data.get('deliveryEnabled', false) == true;
     }
 
+    // Verification costs money per SMS, so it is a per-outlet choice rather
+    // than a platform-wide one. Absent means off, which is what keeps every
+    // existing outlet working exactly as it does today.
+    function requiresPhoneVerification(outletId) {
+      return exists(/databases/$(database)/documents/restaurants/$(outletId)/info/settings)
+        && get(/databases/$(database)/documents/restaurants/$(outletId)/info/settings).data.get('requirePhoneVerification', false) == true;
+    }
+
     function hasDeliveryDetails(outletId, orderId) {
       return exists(/databases/$(database)/documents/restaurants/$(outletId)/deliveryDetails/$(orderId));
     }
@@ -273,7 +315,9 @@ service cloud.firestore {
     match /orgs/{orgId} {
       allow read: if isPlatformAdmin()
                   || (signedIn() && resource.data.get('ownerUid', '') == uid());
-      allow create: if signedIn() && request.resource.data.ownerUid == uid();
+      // isStaffAuth, not signedIn: a verified diner holds a token too, and
+      // without this could file an org nobody asked for.
+      allow create: if isStaffAuth() && request.resource.data.ownerUid == uid();
       allow update, delete: if isPlatformAdmin();
     }
 
@@ -288,7 +332,7 @@ service cloud.firestore {
 
       // Signup. The creator must name themselves as owner and may only submit
       // into a pending state, so nobody can self-activate a paid plan.
-      allow create: if signedIn()
+      allow create: if isStaffAuth()
                     && request.resource.data.ownerUid == uid()
                     && pendingStatus(request.resource.data.subscription.status);
 
@@ -535,10 +579,27 @@ service cloud.firestore {
       // and never rewritable — otherwise an address could be changed after the
       // kitchen had already started.
       match /deliveryDetails/{orderId} {
-        allow read: if canWorkOutlet(outletId);
+        // Staff working the outlet, or -- once verification is on -- the diner
+        // whose own number is on the record. The second clause is what lets a
+        // customer recover their order after a refresh without opening every
+        // other customer's address to them.
+        allow read: if canWorkOutlet(outletId)
+                    || (isVerifiedDiner()
+                        && resource.data.get('phoneE164', '') == dinerPhone());
+
+        // phoneE164 must be the number Firebase verified, not one the client
+        // typed. Comparing against the token is the entire point: otherwise a
+        // diner verifies their own phone and files an order under someone
+        // else's, which is the abuse this was built to stop.
         allow create: if request.resource.data.get('name', '') != ''
                       && request.resource.data.get('phone', '') != ''
-                      && request.resource.data.get('address', '') != '';
+                      && request.resource.data.get('address', '') != ''
+                      && (
+                        !requiresPhoneVerification(outletId)
+                        || (isVerifiedDiner()
+                            && request.resource.data.get('phoneE164', '') == dinerPhone())
+                      );
+
         allow update, delete: if canWorkOutlet(outletId);
       }
 
