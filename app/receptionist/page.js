@@ -1112,7 +1112,14 @@ function ReceptionPage() {
   // NEW: opens the unified Generate Bill modal — customer details + payment
   // method are chosen together, before the bill is written at all.
   function openGenerateBill(o) {
-    setBillFlowForm({ name: "", phone: "", paymentMethod: "cash" });
+    // A delivery customer already gave their name, phone and payment method at
+    // checkout. Asking again wastes the receptionist's time and is a chance to
+    // key it in wrong — and a mistyped phone number is how a rider ends up
+    // unable to reach anyone. Pre-fill it; it stays editable.
+    const d = deliveryDetails[o.id];
+    setBillFlowForm(d
+      ? { name: d.name || "", phone: d.phone || "", paymentMethod: d.paymentMethod === "upi" ? "upi" : "cash", prefilled: true }
+      : { name: "", phone: "", paymentMethod: "cash" });
     setBillFlowOrder(o);
   }
 
@@ -3767,8 +3774,16 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
   const billFlowModal = billFlowOrder && (
     <div style={modalOverlayStyle} onClick={() => setBillFlowOrder(null)}>
       <div style={modalBoxStyle} onClick={(e) => e.stopPropagation()}>
-        <h3 style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>Generate Bill — Table {billFlowOrder.table}</h3>
-        <p style={{ fontSize: 12.5, color: "#888", marginBottom: 16 }}>Customer details are optional. Payment method decides whether a UPI QR is shown on the bill.</p>
+        <h3 style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>
+          Generate Bill — {isDelivery(billFlowOrder) ? "Delivery" : `Table ${billFlowOrder.table}`}
+        </h3>
+        {billFlowForm.prefilled ? (
+          <div style={{ background: "#e0f2fe", border: "1px solid #bae6fd", color: "#0369a1", borderRadius: 10, padding: 11, fontSize: 12.5, lineHeight: 1.5, marginBottom: 16 }}>
+            Filled in from what the customer entered at checkout. Edit anything that looks wrong.
+          </div>
+        ) : (
+          <p style={{ fontSize: 12.5, color: "#888", marginBottom: 16 }}>Customer details are optional. Payment method decides whether a UPI QR is shown on the bill.</p>
+        )}
 
         <label style={labelStyle}>Customer Name (optional)</label>
         <input placeholder="e.g. Rahul Sharma" value={billFlowForm.name} onChange={(e) => setBillFlowForm((p) => ({ ...p, name: e.target.value }))} style={inputStyle} />

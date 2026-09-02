@@ -675,6 +675,7 @@ export function TableContent({ mode = "table" }) {
   const [deliveryErrors, setDeliveryErrors] = useState({});
   const [payMethod, setPayMethod] = useState("cod");
   const [placedOrderId, setPlacedOrderId] = useState(null);
+  const [trackedOrder, setTrackedOrder] = useState(null);
   const [website, setWebsite] = useState(DEFAULT_WEBSITE);
   const [tableSession, setTableSession] = useState(undefined); // undefined = still loading
   const [orderError, setOrderError] = useState("");
@@ -773,6 +774,45 @@ export function TableContent({ mode = "table" }) {
     const unsub = onSnapshot(q, (snap) => setTables(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
     return () => unsub();
   }, [restaurantId]);
+
+  // A delivery customer has no table, so the table listener never sees their
+  // order. The id is kept in this browser when the order is placed, which is
+  // what lets someone close the tab, come back, and still see where their food
+  // is. Only an id is stored — the address stays behind the staff-only rule.
+  useEffect(() => {
+    if (!restaurantId || !isDeliveryMode || placedOrderId) return;
+    try {
+      const saved = localStorage.getItem(`cabadra:lastOrder:${restaurantId}`);
+      if (saved) { setPlacedOrderId(saved); setScreen("deliveryPlaced"); }
+    } catch {}
+  }, [restaurantId, isDeliveryMode, placedOrderId]);
+
+  // Follow that one order. A single document listener, so a hundred people
+  // ordering at once is a hundred cheap listeners rather than anyone reading
+  // anyone else's orders.
+  useEffect(() => {
+    if (!restaurantId || !placedOrderId) return;
+    const unsub = onSnapshot(
+      doc(db, "restaurants", restaurantId, "orders", placedOrderId),
+      (snap) => {
+        if (!snap.exists()) {
+          // Declined and removed by the restaurant.
+          setTrackedOrder(null);
+          try { localStorage.removeItem(`cabadra:lastOrder:${restaurantId}`); } catch {}
+          return;
+        }
+        const data = { id: snap.id, ...snap.data() };
+        setTrackedOrder(data);
+        // Once it is paid or cancelled the journey is over, so the next visit
+        // starts at the menu rather than on a stale tracking screen.
+        if (["paid", "cancelled", "declined"].includes(data.status)) {
+          try { localStorage.removeItem(`cabadra:lastOrder:${restaurantId}`); } catch {}
+        }
+      },
+      () => setTrackedOrder(null),
+    );
+    return () => unsub();
+  }, [restaurantId, placedOrderId]);
 
   // This table's ordering window. Readable on purpose: a guest whose order is
   // refused should be told the table is closed, not shown a bare failure.
@@ -1495,7 +1535,7 @@ export function TableContent({ mode = "table" }) {
 
   // ---------- Delivery order placed ----------
   if (screen === "deliveryPlaced") {
-    const placed = allOrdersRaw.find((o) => o.id === placedOrderId);
+    const placed = trackedOrder || allOrdersRaw.find((o) => o.id === placedOrderId);
     const stage = placed?.status || "pending";
     const steps = [
       { key: "pending", label: "Sent to the restaurant", done: true },
@@ -1525,6 +1565,11 @@ export function TableContent({ mode = "table" }) {
             ))}
           </div>
 
+          {/* Only while this browser still holds what was typed. After a
+              refresh the address is genuinely unavailable — it lives in a
+              staff-only collection, which is the point. The customer knows
+              their own address; the tracking above is what they came back for. */}
+          {deliveryForm.name && (
           <div style={{ background: "#fff", border: "1px solid #e6e1d6", borderRadius: 16, padding: 18, textAlign: "left", marginBottom: 22 }}>
             <div style={{ fontSize: 11.5, fontWeight: 800, color: "#888", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>Delivering to</div>
             <div style={{ fontSize: 14, color: "#1a1a2e", lineHeight: 1.6 }}>
@@ -1536,8 +1581,17 @@ export function TableContent({ mode = "table" }) {
               {payMethod === "cod" ? "Paying cash on delivery" : "Paying by UPI on delivery"}
             </div>
           </div>
+          )}
 
-          <button onClick={() => { setScreen("menu"); setPlacedOrderId(null); }} className="tap-btn"
+          <button onClick={() => {
+            setScreen("menu");
+            setPlacedOrderId(null);
+            setTrackedOrder(null);
+            setDeliveryForm({ name: "", phone: "", address: "", landmark: "" });
+            // Otherwise the restored-order effect would put them straight back
+            // on this screen.
+            try { localStorage.removeItem(`cabadra:lastOrder:${restaurantId}`); } catch {}
+          }} className="tap-btn"
             style={{ padding: "13px 24px", borderRadius: 12, border: "1px solid #e6e1d6", background: "#fff", color: "#1a1a2e", fontWeight: 700, fontSize: 14.5, cursor: "pointer" }}>
             Order something else
           </button>
