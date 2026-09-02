@@ -5,7 +5,7 @@ import { Suspense, useEffect, useState, useRef, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 import { db } from "@/lib/firebase";
 import { collection, addDoc, setDoc, updateDoc, doc, onSnapshot, query, where, orderBy, writeBatch } from "firebase/firestore";
-import { computeOfferPrice, computeBogoDiscount } from "@/lib/pricing";
+import { computeOfferPrice, computeBogoDiscount, receiptFor } from "@/lib/pricing";
 import { mergeItemLines, tableSessionWindowStart } from "@/lib/orders";
 import {
   ORDER_TYPES, DELIVERY_TABLE, validateDeliveryDetails, normalizePhone,
@@ -1606,6 +1606,10 @@ export function TableContent({ mode = "table" }) {
     const steps = deliveryTimeline(placed || { orderType: "delivery", status: "pending" });
     const stage = deliveryStage(placed || { orderType: "delivery" });
     const arrived = stage === DELIVERY_STAGES.DELIVERED;
+    // Estimated from the current menu until the order is billed at dispatch,
+    // then the real figures the customer was actually charged, straight off
+    // the order document.
+    const receipt = placed ? receiptFor(placed, { menuItems, bundleRules }) : null;
     return (
       <div style={{ minHeight: "100vh", background: "#faf8f5", padding: "40px 20px", fontFamily: "system-ui, sans-serif" }}>
         <div style={{ maxWidth: 460, margin: "0 auto", textAlign: "center" }}>
@@ -1650,6 +1654,71 @@ export function TableContent({ mode = "table" }) {
               </div>
             ))}
           </div>
+
+          {/* What they ordered, what it came to, and what they saved. Estimated
+              until the order is billed at dispatch, then the exact figures —
+              reflecting anything reception may have adjusted — read straight
+              off the order document, the same one the printed bill comes from. */}
+          {receipt && receipt.items.length > 0 && (
+          <div style={{ background: "#fff", border: "1px solid #e6e1d6", borderRadius: 16, padding: 18, textAlign: "left", marginBottom: 20 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+              <div style={{ fontSize: 11.5, fontWeight: 800, color: "#888", textTransform: "uppercase", letterSpacing: 0.5 }}>
+                {receipt.isFinal ? "Your bill" : "Your order"}
+              </div>
+              {!receipt.isFinal && (
+                <div style={{ fontSize: 11, color: "#b58a3d", fontWeight: 700 }}>Estimate</div>
+              )}
+            </div>
+
+            {receipt.items.map((it, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "5px 0", color: "#1a1a2e" }}>
+                <span>{it.name} × {it.qty}</span>
+                <span>₹{it.price * it.qty}</span>
+              </div>
+            ))}
+
+            <div style={{ borderTop: "1px solid #f0ebe3", margin: "8px 0" }} />
+
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13.5, color: "#666", padding: "3px 0" }}>
+              <span>Subtotal</span><span>₹{receipt.subtotal}</span>
+            </div>
+            {receipt.discounts.map((d, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13.5, color: "#16a34a", padding: "3px 0" }}>
+                <span>{d.name}</span><span>-₹{d.amount}</span>
+              </div>
+            ))}
+            {receipt.deliveryFee > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13.5, color: "#666", padding: "3px 0" }}>
+                <span>Delivery</span><span>₹{receipt.deliveryFee}</span>
+              </div>
+            )}
+            {receipt.taxAmount > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13.5, color: "#666", padding: "3px 0" }}>
+                <span>Tax ({receipt.taxPercent}%)</span><span>₹{receipt.taxAmount}</span>
+              </div>
+            )}
+            {receipt.serviceAmount > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13.5, color: "#666", padding: "3px 0" }}>
+                <span>Service ({receipt.servicePercent}%)</span><span>₹{receipt.serviceAmount}</span>
+              </div>
+            )}
+
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, paddingTop: 10, borderTop: "2px solid #1a1a2e", fontSize: 16, fontWeight: 800, color: "#1a1a2e" }}>
+              <span>Total</span><span>₹{receipt.total}</span>
+            </div>
+
+            {receipt.discountTotal > 0 && (
+              <div style={{ fontSize: 12.5, color: "#16a34a", fontWeight: 700, marginTop: 8, textAlign: "center" }}>
+                🎉 You saved ₹{receipt.discountTotal}
+              </div>
+            )}
+            {!receipt.isFinal && (
+              <div style={{ fontSize: 11.5, color: "#999", marginTop: 8, textAlign: "center" }}>
+                Final bill, including tax, is confirmed once the restaurant dispatches your order.
+              </div>
+            )}
+          </div>
+          )}
 
           {/* Only while this browser still holds what was typed. After a
               refresh the address is genuinely unavailable — it lives in a
