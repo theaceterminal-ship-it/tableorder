@@ -1305,15 +1305,26 @@ export function TableContent({ mode = "table" }) {
           <button onClick={() => setShowCartSummary(false)} style={{ background: "none", border: "none", fontSize: 24, cursor: "pointer", color: "#888" }}>×</button>
         </div>
 
-        <div style={{ display: "flex", gap: 8, background: "#f8f6f3", borderRadius: 12, padding: 4, marginBottom: 18 }}>
-          {[["dinein", "🍽️ Dine-in"], ["takeaway", "📦 Takeaway"]].map(([val, label]) => (
-            <button key={val} onClick={() => setOrderType(val)} className="tap-btn"
-              style={{ flex: 1, padding: "10px", borderRadius: 9, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 13,
-                background: orderType === val ? "#1a1a2e" : "transparent", color: orderType === val ? "#fff" : "#888" }}>
-              {label}
-            </button>
-          ))}
-        </div>
+        {/* Dine-in or takeaway is a choice you make in the building. Someone
+            ordering from a link has already chosen delivery by being here. */}
+        {!isDeliveryMode && (
+          <div style={{ display: "flex", gap: 8, background: "#f8f6f3", borderRadius: 12, padding: 4, marginBottom: 18 }}>
+            {[["dinein", "🍽️ Dine-in"], ["takeaway", "📦 Takeaway"]].map(([val, label]) => (
+              <button key={val} onClick={() => setOrderType(val)} className="tap-btn"
+                style={{ flex: 1, padding: "10px", borderRadius: 9, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 13,
+                  background: orderType === val ? "#1a1a2e" : "transparent", color: orderType === val ? "#fff" : "#888" }}>
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {isDeliveryMode && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#e0f2fe", color: "#0369a1", borderRadius: 12, padding: "10px 14px", marginBottom: 18, fontSize: 13, fontWeight: 700 }}>
+            <span>🛵</span>
+            <span>Delivery{website.deliveryEtaMinutes ? ` · about ${website.deliveryEtaMinutes} min` : ""}</span>
+          </div>
+        )}
 
         {Object.entries(cart).map(([lineId, line]) => {
           const item = findItem(line.itemId);
@@ -1591,7 +1602,11 @@ export function TableContent({ mode = "table" }) {
   }
 
   // ---------- Table picker ----------
-  if (!tableNo) {
+  //
+  // Only for someone sitting in the restaurant whose QR did not carry a table
+  // number. A delivery customer has no table and must never be asked to pick
+  // one — they came from a link on a Google profile, not from a seat.
+  if (!tableNo && !isDeliveryMode) {
     return (
       <div style={{ minHeight: "100vh", background: "#fff", padding: 24, fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" }}>
         <div style={{ maxWidth: 480, margin: "0 auto" }}>
@@ -1635,7 +1650,7 @@ export function TableContent({ mode = "table" }) {
         <div style={{ maxWidth: 480, margin: "0 auto" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
             {profile?.logoUrl && (<img src={profile.logoUrl} alt="logo" style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover" }} />)}
-            <div><div style={{ fontWeight: 700, fontSize: 18 }}>{profile?.name || "Cabadra"}</div><div style={{ fontSize: 13, color: "#888" }}>Table {tableNo}</div></div>
+            <div><div style={{ fontWeight: 700, fontSize: 18 }}>{profile?.name || "Cabadra"}</div><div style={{ fontSize: 13, color: "#888" }}>{isDeliveryMode ? "Delivery" : `Table ${tableNo}`}</div></div>
           </div>
 
           {o.status === "bill_requested" && (
@@ -1662,7 +1677,7 @@ export function TableContent({ mode = "table" }) {
                 <div style={{ textAlign: "center", marginBottom: 16 }}>
                   <div style={{ fontSize: 13, color: "#888", textTransform: "uppercase", letterSpacing: 1 }}>Receipt</div>
                   <div style={{ fontSize: 20, fontWeight: 800, marginTop: 4 }}>{profile?.name || "Cabadra"}</div>
-                  <div style={{ fontSize: 12, color: "#888" }}>Table {tableNo}</div>
+                  <div style={{ fontSize: 12, color: "#888" }}>{isDeliveryMode ? "Delivery" : `Table ${tableNo}`}</div>
                 </div>
                 {o.items.map((it, i) => (
                   <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", fontSize: 15, borderBottom: i < o.items.length - 1 ? "1px dotted #eee" : "none" }}>
@@ -1711,7 +1726,7 @@ export function TableContent({ mode = "table" }) {
         <div style={{ maxWidth: 480, margin: "0 auto" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
             {profile?.logoUrl && (<img src={profile.logoUrl} alt="logo" style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover" }} />)}
-            <div><div style={{ fontWeight: 700, fontSize: 18 }}>{profile?.name || "Cabadra"}</div><div style={{ fontSize: 13, color: "#888" }}>Table {tableNo}</div></div>
+            <div><div style={{ fontWeight: 700, fontSize: 18 }}>{profile?.name || "Cabadra"}</div><div style={{ fontSize: 13, color: "#888" }}>{isDeliveryMode ? "Delivery" : `Table ${tableNo}`}</div></div>
           </div>
 
           <div style={{ background: "#1C1B1A", color: "#fff", borderRadius: 20, padding: 32, textAlign: "center", marginBottom: 24 }}>
@@ -1828,13 +1843,16 @@ export function TableContent({ mode = "table" }) {
         <div style={{ maxWidth: 480, margin: "0 auto", padding: "16px 20px 14px" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 10 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, flexShrink: 0 }}>
-                <button onClick={() => { playTone(500, 60); setShowWaiterModal(true); }} className="tap-btn" aria-label="Call Waiter"
-                  style={{ width: 38, height: 38, borderRadius: "50%", border: "none", background: "#1a1a2e", color: "#fff", fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px rgba(26,26,46,0.25)" }}>
-                  🛎️
-                </button>
-                <span style={{ fontSize: 8.5, fontWeight: 700, color: "#a08a5c", whiteSpace: "nowrap", letterSpacing: 0.2 }}>Call Staff</span>
-              </div>
+              {/* Calling a waiter means nothing to someone ordering from home. */}
+              {!isDeliveryMode && (
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, flexShrink: 0 }}>
+                  <button onClick={() => { playTone(500, 60); setShowWaiterModal(true); }} className="tap-btn" aria-label="Call Waiter"
+                    style={{ width: 38, height: 38, borderRadius: "50%", border: "none", background: "#1a1a2e", color: "#fff", fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px rgba(26,26,46,0.25)" }}>
+                    🛎️
+                  </button>
+                  <span style={{ fontSize: 8.5, fontWeight: 700, color: "#a08a5c", whiteSpace: "nowrap", letterSpacing: 0.2 }}>Call Staff</span>
+                </div>
+              )}
               {profile?.logoUrl ? (
                 <img src={profile.logoUrl} alt="logo" style={{ width: 40, height: 40, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />
               ) : (
@@ -1847,14 +1865,16 @@ export function TableContent({ mode = "table" }) {
                 {profile?.tagline ? (
                   <div style={{ fontSize: 10.5, color: "#a08a5c", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{profile.tagline}</div>
                 ) : (
-                  <div style={{ fontSize: 11, color: "#a08a5c", fontWeight: 600 }}>📍 Table {tableNo}</div>
+                  <div style={{ fontSize: 11, color: "#a08a5c", fontWeight: 600 }}>
+                    {isDeliveryMode ? "🛵 Delivery" : `📍 Table ${tableNo}`}
+                  </div>
                 )}
               </div>
             </div>
 
             <span style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.7)", padding: "6px 12px", borderRadius: 100, fontSize: 12.5, fontWeight: 700, color: "#1a1a2e", flexShrink: 0 }}>
-              <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#dc2626", flexShrink: 0 }} />
-              Table {tableNo}
+              <span style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0, background: isDeliveryMode ? (isOpenAt(website.hours) ? "#16a34a" : "#dc2626") : "#dc2626" }} />
+              {isDeliveryMode ? (isOpenAt(website.hours) ? "Open now" : "Closed") : `Table ${tableNo}`}
             </span>
           </div>
 
