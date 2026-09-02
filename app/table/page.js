@@ -7,7 +7,10 @@ import { db } from "@/lib/firebase";
 import { collection, addDoc, setDoc, updateDoc, doc, onSnapshot, query, where, orderBy, writeBatch } from "firebase/firestore";
 import { computeOfferPrice, computeBogoDiscount } from "@/lib/pricing";
 import { mergeItemLines, tableSessionWindowStart } from "@/lib/orders";
-import { ORDER_TYPES, DELIVERY_TABLE, validateDeliveryDetails, normalizePhone } from "@/lib/order-types";
+import {
+  ORDER_TYPES, DELIVERY_TABLE, validateDeliveryDetails, normalizePhone,
+  deliveryTimeline, deliveryStage, isDeliveryComplete, DELIVERY_STAGES,
+} from "@/lib/order-types";
 import { isSessionOpen, BLOCKED_MESSAGES } from "@/lib/table-session";
 import {
   DEFAULT_WEBSITE, orderingBlockedReason, blockedMessage,
@@ -803,9 +806,11 @@ export function TableContent({ mode = "table" }) {
         }
         const data = { id: snap.id, ...snap.data() };
         setTrackedOrder(data);
-        // Once it is paid or cancelled the journey is over, so the next visit
-        // starts at the menu rather than on a stale tracking screen.
-        if (["paid", "cancelled", "declined"].includes(data.status)) {
+        // Once the food has arrived the journey is over — the stored id is
+        // dropped so the NEXT visit starts at the menu. The screen itself stays
+        // up for this visit, showing "Delivered", rather than vanishing from
+        // under someone who is still looking at it.
+        if (isDeliveryComplete(data)) {
           try { localStorage.removeItem(`cabadra:lastOrder:${restaurantId}`); } catch {}
         }
       },
@@ -1536,22 +1541,43 @@ export function TableContent({ mode = "table" }) {
   // ---------- Delivery order placed ----------
   if (screen === "deliveryPlaced") {
     const placed = trackedOrder || allOrdersRaw.find((o) => o.id === placedOrderId);
-    const stage = placed?.status || "pending";
-    const steps = [
-      { key: "pending", label: "Sent to the restaurant", done: true },
-      { key: "confirmed", label: "Confirmed", done: ["confirmed", "preparing", "ready", "served", "billed", "paid"].includes(stage) },
-      { key: "preparing", label: "Being cooked", done: ["preparing", "ready", "served", "billed", "paid"].includes(stage) },
-      { key: "ready", label: "Out for delivery", done: ["ready", "served", "billed", "paid"].includes(stage) },
-    ];
+    // Derived rather than stored, so a status changed by the kitchen or a rider
+    // handed the order is reflected here without anything having to sync.
+    const steps = deliveryTimeline(placed || { orderType: "delivery", status: "pending" });
+    const stage = deliveryStage(placed || { orderType: "delivery" });
+    const arrived = stage === DELIVERY_STAGES.DELIVERED;
     return (
       <div style={{ minHeight: "100vh", background: "#faf8f5", padding: "40px 20px", fontFamily: "system-ui, sans-serif" }}>
         <div style={{ maxWidth: 460, margin: "0 auto", textAlign: "center" }}>
-          <div style={{ fontSize: 52, marginBottom: 14 }}>🛵</div>
-          <h1 style={{ fontSize: 24, fontWeight: 800, color: "#1a1a2e", margin: "0 0 8px" }}>Order placed</h1>
-          <p style={{ color: "#6b6b7b", fontSize: 14.5, lineHeight: 1.6, margin: "0 0 26px" }}>
-            {profile?.name || "The restaurant"} has your order and will confirm it shortly.
-            {website.deliveryEtaMinutes ? ` Delivery usually takes about ${website.deliveryEtaMinutes} minutes.` : ""}
+          <div style={{ fontSize: 52, marginBottom: 14 }}>{arrived ? "🎉" : "🛵"}</div>
+          <h1 style={{ fontSize: 24, fontWeight: 800, color: "#1a1a2e", margin: "0 0 8px" }}>
+            {arrived ? "Delivered — enjoy!" : stage === DELIVERY_STAGES.DISPATCHED ? "On its way" : "Order placed"}
+          </h1>
+          <p style={{ color: "#6b6b7b", fontSize: 14.5, lineHeight: 1.6, margin: "0 0 22px" }}>
+            {arrived
+              ? `Thanks for ordering from ${profile?.name || "us"}.`
+              : stage === DELIVERY_STAGES.DISPATCHED
+                ? "Your food has left the restaurant."
+                : `${profile?.name || "The restaurant"} has your order and will confirm it shortly.${website.deliveryEtaMinutes ? ` Delivery usually takes about ${website.deliveryEtaMinutes} minutes.` : ""}`}
           </p>
+
+          {/* Being able to call the person carrying your dinner is most of the
+              value of a tracking screen. */}
+          {placed?.riderName && !arrived && (
+            <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 16, padding: 16, marginBottom: 20, textAlign: "left", display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ width: 42, height: 42, borderRadius: "50%", background: "#16a34a", color: "#fff", display: "grid", placeItems: "center", fontSize: 19, flexShrink: 0 }}>🛵</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11.5, fontWeight: 800, color: "#166534", textTransform: "uppercase", letterSpacing: 0.4 }}>Your rider</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: "#1a1a2e" }}>{placed.riderName}</div>
+              </div>
+              {placed.riderPhone && (
+                <a href={`tel:${placed.riderPhone}`} className="tap-btn"
+                  style={{ background: "#16a34a", color: "#fff", padding: "10px 16px", borderRadius: 12, fontSize: 13.5, fontWeight: 700, textDecoration: "none", flexShrink: 0 }}>
+                  Call
+                </a>
+              )}
+            </div>
+          )}
 
           <div style={{ background: "#fff", border: "1px solid #e6e1d6", borderRadius: 16, padding: 20, textAlign: "left", marginBottom: 20 }}>
             {steps.map((st, i) => (

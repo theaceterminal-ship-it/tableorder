@@ -5,7 +5,10 @@ import { useEffect, useState, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import CrmSection from "./sections/CrmSection";
 import OnlineOrderingSection from "./sections/OnlineOrderingSection";
-import { orderTypeMeta, isDelivery, formatDeliveryAddress } from "@/lib/order-types";
+import {
+  orderTypeMeta, isDelivery, formatDeliveryAddress,
+  nextDeliveryAction, deliveryStage, validateRider, DELIVERY_STAGES,
+} from "@/lib/order-types";
 import {
   issueTableToken, openTableSession, closeTableSession, openSessionsFor, closeSessionsFor,
 } from "@/lib/table-sessions-store";
@@ -149,6 +152,14 @@ function OrderCard({ order, children, onMoveClick, groupTables, sourceTables, de
         </div>
         <span style={{ fontSize: 11.5, color: "var(--text-secondary, #6b6b7b)" }}>{new Date(order.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
       </div>
+      {forDelivery && order.riderName && (
+        <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 10, padding: "8px 11px", marginBottom: 10, fontSize: 12.5, color: "#166534", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ fontWeight: 800 }}>
+            {order.deliveredAt ? "✓ Delivered by" : "🛵 Out with"} {order.riderName}
+          </span>
+          <a href={`tel:${order.riderPhone}`} style={{ color: "#166534", textDecoration: "underline" }}>{order.riderPhone}</a>
+        </div>
+      )}
       {/* A rider cannot deliver from a ticket that does not say where to. */}
       {forDelivery && delivery && (
         <div style={{ background: typeMeta.bg, borderRadius: 10, padding: "9px 11px", marginBottom: 10, fontSize: 12.5, lineHeight: 1.5 }}>
@@ -515,6 +526,9 @@ function ReceptionPage() {
   const [mergeMode, setMergeMode] = useState(false);
   const [mergePrimary, setMergePrimary] = useState(null);
   const [mergeSelected, setMergeSelected] = useState([]);
+  const [dispatchOrder, setDispatchOrder] = useState(null);
+  const [riderForm, setRiderForm] = useState({ name: "", phone: "" });
+  const [riderErrors, setRiderErrors] = useState({});
   const [qrModalTable, setQrModalTable] = useState(null);
   // The token is returned exactly once, when it is issued. Nothing can read it
   // back, so it lives here only until the modal closes.
@@ -1121,6 +1135,43 @@ function ReceptionPage() {
       ? { name: d.name || "", phone: d.phone || "", paymentMethod: d.paymentMethod === "upi" ? "upi" : "cash", prefilled: true }
       : { name: "", phone: "", paymentMethod: "cash" });
     setBillFlowOrder(o);
+  }
+
+  // Handing an order to a rider. The rider's name and number go on the order
+  // itself, because the customer's browser can read that and nothing else —
+  // being able to call the person carrying your dinner is most of the value of
+  // a tracking screen.
+  async function confirmDispatch() {
+    const errors = validateRider(riderForm);
+    if (Object.keys(errors).length > 0) { setRiderErrors(errors); return; }
+    const o = dispatchOrder;
+    try {
+      await updateDoc(doc(db, "restaurants", restaurantId, "orders", o.id), {
+        dispatchedAt: Date.now(),
+        riderName: riderForm.name.trim(),
+        riderPhone: riderForm.phone.trim(),
+      });
+      setDispatchOrder(null);
+      setRiderForm({ name: "", phone: "" });
+      setRiderErrors({});
+    } catch (e) {
+      setRiderErrors({ phone: e?.code === "permission-denied"
+        ? "You do not have permission to update this order."
+        : e.message });
+    }
+  }
+
+  // Closing the loop. A cash-on-delivery order is settled at the door, so
+  // marking it delivered also settles it — otherwise every delivery would sit
+  // in Awaiting Payment forever waiting for a step that already happened.
+  async function markDelivered(o) {
+    const details = deliveryDetails[o.id];
+    const paidAtDoor = (details?.paymentMethod || "cod") !== "unpaid";
+    await updateDoc(doc(db, "restaurants", restaurantId, "orders", o.id), {
+      deliveredAt: Date.now(),
+      status: paidAtDoor ? "paid" : o.status,
+      ...(paidAtDoor ? { paymentMethod: details?.paymentMethod === "upi" ? "upi" : "cash" } : {}),
+    });
   }
 
   async function markPaid(id, method = "cash") {
@@ -2551,7 +2602,17 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                 ))}
                 {orderFilter === "active" && currentData.map((g) => (
                   <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]} onMoveClick={g.tables.length > 1 ? undefined : openMoveOrder}>
-                    {g.orders.some((o) => o.status === "ready") ? (
+                    {nextDeliveryAction(g.rep) === "dispatch" ? (
+                      <button className="btn btn-sm btn-primary" style={{ width: "100%" }}
+                        onClick={() => { setDispatchOrder(g.rep); setRiderForm({ name: "", phone: "" }); setRiderErrors({}); }}>
+                        🛵 Hand to rider
+                      </button>
+                    ) : nextDeliveryAction(g.rep) === "deliver" ? (
+                      <button className="btn btn-sm btn-success" style={{ width: "100%" }}
+                        onClick={() => markDelivered(g.rep)}>
+                        ✓ Mark delivered
+                      </button>
+                    ) : g.orders.some((o) => o.status === "ready") ? (
                       <button className="btn btn-sm btn-success" style={{ width: "100%" }}
                         onClick={() => g.orders.filter((o) => o.status === "ready").forEach((o) => markServed(o.id))}>
                         Mark as Served
@@ -3771,6 +3832,42 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
   // AND the payment method up front (instead of asking payment method later
   // at Mark Paid time). Choosing UPI shows the QR + "Open in UPI App" button
   // right there on the bill; any other method just shows the plain bill.
+  const dispatchModal = dispatchOrder && (
+    <div style={modalOverlayStyle} onClick={() => setDispatchOrder(null)}>
+      <div style={modalBoxStyle} onClick={(e) => e.stopPropagation()}>
+        <h3 style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>Hand to a rider</h3>
+        <p style={{ fontSize: 12.5, color: "#888", marginBottom: 16 }}>
+          The customer is shown this name and number so they can be reached about a door code or a
+          wrong turn. A rider nobody can call is the commonest reason a delivery goes wrong.
+        </p>
+
+        <label style={labelStyle}>Rider name</label>
+        <input placeholder="e.g. Ramesh" value={riderForm.name}
+          onChange={(e) => { setRiderForm((p) => ({ ...p, name: e.target.value })); setRiderErrors((p) => ({ ...p, name: undefined })); }}
+          style={{ ...inputStyle, borderColor: riderErrors.name ? "#dc2626" : undefined }} />
+        {riderErrors.name && <div style={{ color: "#dc2626", fontSize: 12, marginTop: -8, marginBottom: 10 }}>{riderErrors.name}</div>}
+
+        <label style={labelStyle}>Rider phone</label>
+        <input placeholder="e.g. 98765 43210" value={riderForm.phone}
+          onChange={(e) => { setRiderForm((p) => ({ ...p, phone: e.target.value })); setRiderErrors((p) => ({ ...p, phone: undefined })); }}
+          style={{ ...inputStyle, borderColor: riderErrors.phone ? "#dc2626" : undefined }} />
+        {riderErrors.phone && <div style={{ color: "#dc2626", fontSize: 12, marginTop: -8, marginBottom: 10 }}>{riderErrors.phone}</div>}
+
+        {deliveryDetails[dispatchOrder.id] && (
+          <div style={{ background: "#e0f2fe", color: "#0369a1", borderRadius: 10, padding: 11, fontSize: 12.5, lineHeight: 1.5, marginBottom: 14 }}>
+            <strong>{deliveryDetails[dispatchOrder.id].name}</strong> · {deliveryDetails[dispatchOrder.id].phone}
+            <br />{formatDeliveryAddress(deliveryDetails[dispatchOrder.id])}
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setDispatchOrder(null)}>Cancel</button>
+          <button className="btn btn-primary" style={{ flex: 1 }} onClick={confirmDispatch}>Send it</button>
+        </div>
+      </div>
+    </div>
+  );
+
   const billFlowModal = billFlowOrder && (
     <div style={modalOverlayStyle} onClick={() => setBillFlowOrder(null)}>
       <div style={modalBoxStyle} onClick={(e) => e.stopPropagation()}>
@@ -3920,6 +4017,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
       {splitBillModal}
       {qrModal}
       {moveOrderModal}
+      {dispatchModal}
       {billFlowModal}
       {posVariantModalUi}
 
