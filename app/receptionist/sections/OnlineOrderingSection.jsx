@@ -16,6 +16,8 @@ import {
 } from "@/lib/website-setup";
 import { SectionHeader, labelStyle, inputStyle } from "./ui";
 import { isOtpEnabled } from "@/lib/phone-auth";
+import { useRiders } from "@/lib/use-outlet-data";
+import RidersManager from "./RidersManager";
 
 function Toggle({ on, onChange, title, hint }) {
   return (
@@ -46,6 +48,7 @@ function Toggle({ on, onChange, title, hint }) {
 }
 
 export default function OnlineOrderingSection({ outletId, restaurantName, settings }) {
+  const riders = useRiders(outletId);
   const [form, setForm] = useState(DEFAULT_WEBSITE);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -258,6 +261,8 @@ export default function OnlineOrderingSection({ outletId, restaurantName, settin
           </div>
         </div>
       )}
+
+      {form.deliveryEnabled && <RidersManager outletId={outletId} riders={riders} />}
 
       {/* Hours */}
       <div className="card" style={{ padding: 20, borderRadius: 16, marginBottom: 16 }}>

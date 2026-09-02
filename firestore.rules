@@ -543,6 +543,15 @@ service cloud.firestore {
         allow write: if canManageOutlet(outletId);
       }
 
+      // The outlet's saved list of riders, so reception can pick a name at
+      // dispatch instead of typing one in for every delivery. Staff-only in
+      // both directions: a rider's phone number has no reason to be public,
+      // and this is an operational list reception maintains day to day, same
+      // standing as tables or waiter calls below.
+      match /riders/{riderId} {
+        allow read, write: if canWorkOutlet(outletId);
+      }
+
       // profile and settings are public (name, logo, veg flag, review link).
       // billing holds the outlet's UPI id and tax configuration — staff only.
       match /info/{docId} {

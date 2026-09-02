@@ -7,9 +7,10 @@ import CrmSection from "./sections/CrmSection";
 import OnlineOrderingSection from "./sections/OnlineOrderingSection";
 import {
   orderTypeMeta, isDelivery, formatDeliveryAddress, orderDestinationLabel,
-  nextDeliveryAction, deliveryStage, validateRider, DELIVERY_STAGES,
+  nextDeliveryAction, deliveryStage, DELIVERY_STAGES,
   isInFlightDelivery,
 } from "@/lib/order-types";
+import { activeRiders, riderById } from "@/lib/riders";
 import {
   issueTableToken, openTableSession, closeTableSession, openSessionsFor, closeSessionsFor,
 } from "@/lib/table-sessions-store";
@@ -17,7 +18,7 @@ import { tableUrl, isSessionOpen } from "@/lib/table-session";
 import {
   useOrders, useMenuItems, useCategories, useTables, useFloors,
   useOfferBanners, useBundleRules, useWaiterCalls, useCustomers,
-  useStaff, useBillCustomers, useOutletInfo, useDeliveryDetails, useTableSessions,
+  useStaff, useBillCustomers, useOutletInfo, useDeliveryDetails, useTableSessions, useRiders,
 } from "@/lib/use-outlet-data";
 import { db } from "@/lib/firebase";
 import { uploadToCloudinary } from "@/lib/cloudinary";
@@ -411,6 +412,7 @@ function ReceptionPage() {
   const waiterCalls = useWaiterCalls(restaurantId);
   const customers = useCustomers(restaurantId);
   const staffList = useStaff(restaurantId);
+  const riders = useRiders(restaurantId);
   const billCustomers = useBillCustomers(restaurantId);
   // Where each delivery order is going. Kept off the order document because
   // orders are publicly readable; see firestore.rules.
@@ -528,7 +530,8 @@ function ReceptionPage() {
   const [mergePrimary, setMergePrimary] = useState(null);
   const [mergeSelected, setMergeSelected] = useState([]);
   const [dispatchOrder, setDispatchOrder] = useState(null);
-  const [riderForm, setRiderForm] = useState({ name: "", phone: "" });
+  // A rider chosen from the saved roster, not typed — see lib/riders.js.
+  const [selectedRiderId, setSelectedRiderId] = useState("");
   const [riderErrors, setRiderErrors] = useState({});
   const [qrModalTable, setQrModalTable] = useState(null);
   // The token is returned exactly once, when it is issued. Nothing can read it
@@ -1155,8 +1158,8 @@ function ReceptionPage() {
   // being able to call the person carrying your dinner is most of the value of
   // a tracking screen.
   async function confirmDispatch() {
-    const errors = validateRider(riderForm);
-    if (Object.keys(errors).length > 0) { setRiderErrors(errors); return; }
+    const rider = riderById(riders, selectedRiderId);
+    if (!rider) { setRiderErrors({ phone: "Please choose a rider." }); return; }
     const o = dispatchOrder;
     try {
       // The bill is generated HERE, as the food leaves, for two reasons: it is
@@ -1178,11 +1181,14 @@ function ReceptionPage() {
       }
       await updateDoc(doc(db, "restaurants", restaurantId, "orders", o.id), {
         dispatchedAt: Date.now(),
-        riderName: riderForm.name.trim(),
-        riderPhone: riderForm.phone.trim(),
+        // Copied from the roster entry at this moment, not referenced by id —
+        // the customer's tracker and the printed bill should keep showing
+        // exactly who picked up this order even if the roster changes later.
+        riderName: rider.name,
+        riderPhone: rider.phone,
       });
       setDispatchOrder(null);
-      setRiderForm({ name: "", phone: "" });
+      setSelectedRiderId("");
       setRiderErrors({});
     } catch (e) {
       setRiderErrors({ phone: e?.code === "permission-denied"
@@ -2647,7 +2653,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                   <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]} onMoveClick={g.tables.length > 1 ? undefined : openMoveOrder}>
                     {nextDeliveryAction(g.rep) === "dispatch" ? (
                       <button className="btn btn-sm btn-primary" style={{ width: "100%" }}
-                        onClick={() => { setDispatchOrder(g.rep); setRiderForm({ name: "", phone: "" }); setRiderErrors({}); }}>
+                        onClick={() => { setDispatchOrder(g.rep); setSelectedRiderId(""); setRiderErrors({}); }}>
                         🛵 Hand to rider
                       </button>
                     ) : nextDeliveryAction(g.rep) === "deliver" ? (
@@ -3886,6 +3892,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
   // AND the payment method up front (instead of asking payment method later
   // at Mark Paid time). Choosing UPI shows the QR + "Open in UPI App" button
   // right there on the bill; any other method just shows the plain bill.
+  const availableRiders = activeRiders(riders);
   const dispatchModal = dispatchOrder && (
     <div style={modalOverlayStyle} onClick={() => setDispatchOrder(null)}>
       <div style={modalBoxStyle} onClick={(e) => e.stopPropagation()}>
@@ -3895,17 +3902,31 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
           wrong turn. A rider nobody can call is the commonest reason a delivery goes wrong.
         </p>
 
-        <label style={labelStyle}>Rider name</label>
-        <input placeholder="e.g. Ramesh" value={riderForm.name}
-          onChange={(e) => { setRiderForm((p) => ({ ...p, name: e.target.value })); setRiderErrors((p) => ({ ...p, name: undefined })); }}
-          style={{ ...inputStyle, borderColor: riderErrors.name ? "#dc2626" : undefined }} />
-        {riderErrors.name && <div style={{ color: "#dc2626", fontSize: 12, marginTop: -8, marginBottom: 10 }}>{riderErrors.name}</div>}
-
-        <label style={labelStyle}>Rider phone</label>
-        <input placeholder="e.g. 98765 43210" value={riderForm.phone}
-          onChange={(e) => { setRiderForm((p) => ({ ...p, phone: e.target.value })); setRiderErrors((p) => ({ ...p, phone: undefined })); }}
-          style={{ ...inputStyle, borderColor: riderErrors.phone ? "#dc2626" : undefined }} />
-        {riderErrors.phone && <div style={{ color: "#dc2626", fontSize: 12, marginTop: -8, marginBottom: 10 }}>{riderErrors.phone}</div>}
+        {availableRiders.length > 0 ? (
+          <>
+            <label style={labelStyle}>Rider</label>
+            <div style={{ display: "grid", gap: 8, marginBottom: 6 }}>
+              {availableRiders.map((r) => (
+                <button key={r.id} type="button"
+                  onClick={() => { setSelectedRiderId(r.id); setRiderErrors({}); }}
+                  style={{
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                    padding: "12px 14px", borderRadius: 12, cursor: "pointer", fontFamily: "inherit", textAlign: "left",
+                    border: selectedRiderId === r.id ? "2px solid #1a1a2e" : "1.5px solid var(--border, #e6e1d6)",
+                    background: selectedRiderId === r.id ? "#faf8f5" : "var(--surface, #fff)",
+                  }}>
+                  <span style={{ fontSize: 14.5, fontWeight: 700, color: "#1a1a2e" }}>{r.name}</span>
+                  <span style={{ fontSize: 12.5, color: "#888" }}>{r.phone}</span>
+                </button>
+              ))}
+            </div>
+            {riderErrors.phone && <div style={{ color: "#dc2626", fontSize: 12, marginBottom: 10 }}>{riderErrors.phone}</div>}
+          </>
+        ) : (
+          <div style={{ background: "#fef3c7", border: "1px solid #fde68a", color: "#92400e", borderRadius: 10, padding: 12, fontSize: 12.5, lineHeight: 1.5, marginBottom: 14 }}>
+            No riders added yet. Add one under <strong>Online Ordering → Riders</strong> in settings, then come back here.
+          </div>
+        )}
 
         {deliveryDetails[dispatchOrder.id] && (
           <div style={{ background: "#e0f2fe", color: "#0369a1", borderRadius: 10, padding: 11, fontSize: 12.5, lineHeight: 1.5, marginBottom: 14 }}>
@@ -3916,7 +3937,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
 
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setDispatchOrder(null)}>Cancel</button>
-          <button className="btn btn-primary" style={{ flex: 1 }} onClick={confirmDispatch}>Send it</button>
+          <button className="btn btn-primary" style={{ flex: 1 }} disabled={!selectedRiderId} onClick={confirmDispatch}>Send it</button>
         </div>
       </div>
     </div>

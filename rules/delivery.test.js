@@ -181,3 +181,45 @@ describe("the quoted delivery fee", () => {
     await assertFails(placeWithFee("40"));
   });
 });
+
+describe("the rider roster", () => {
+  // Staff-only in both directions, same standing as tables or waiter calls:
+  // this is an operational list reception maintains day to day, and a
+  // rider's phone number has no reason to be public.
+  it("lets reception add a rider", async () => {
+    await assertSucceeds(setDoc(doc(as(RECEPTION), "restaurants", OUTLET, "riders", "r1"), {
+      name: "Ramesh", phone: "9876543210", active: true, createdAt: Date.now(),
+    }));
+  });
+
+  it("lets reception read the roster", async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), "restaurants", OUTLET, "riders", "r1"),
+        { name: "Ramesh", phone: "9876543210", active: true });
+    });
+    await assertSucceeds(getDoc(doc(as(RECEPTION), "restaurants", OUTLET, "riders", "r1")));
+  });
+
+  it("refuses an outsider entirely", async () => {
+    await assertFails(getDoc(doc(as(OUTSIDER), "restaurants", OUTLET, "riders", "r1")));
+    await assertFails(setDoc(doc(as(OUTSIDER), "restaurants", OUTLET, "riders", "r1"),
+      { name: "Someone", phone: "9000000000" }));
+  });
+
+  it("refuses an anonymous diner", async () => {
+    // A rider's phone number is not something a customer's browser should be
+    // able to read or, worse, overwrite.
+    await assertFails(getDoc(doc(anon(), "restaurants", OUTLET, "riders", "r1")));
+    await assertFails(setDoc(doc(anon(), "restaurants", OUTLET, "riders", "r1"),
+      { name: "Someone", phone: "9000000000" }));
+  });
+
+  it("lets reception deactivate a rider without deleting them", async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), "restaurants", OUTLET, "riders", "r1"),
+        { name: "Ramesh", phone: "9876543210", active: true });
+    });
+    await assertSucceeds(setDoc(doc(as(RECEPTION), "restaurants", OUTLET, "riders", "r1"),
+      { name: "Ramesh", phone: "9876543210", active: false }, { merge: true }));
+  });
+});
