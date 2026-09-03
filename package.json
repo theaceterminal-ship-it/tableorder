@@ -11,9 +11,11 @@
     "test:watch": "vitest",
     "test:rules": "node scripts/test-rules.mjs",
     "lint:undef": "eslint --no-config-lookup -c undef.config.mjs app lib",
-    "build:rec-models": "node scripts/build-rec-models.mjs"
+    "build:rec-models": "node scripts/build-rec-models.mjs",
+    "backup:firestore": "node scripts/backup-firestore.mjs"
   },
   "dependencies": {
+    "@sentry/nextjs": "^10.73.0",
     "firebase": "^12.16.0",
     "firebase-admin": "^14.3.0",
     "jszip": "^3.10.1",
