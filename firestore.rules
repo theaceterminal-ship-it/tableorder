@@ -704,9 +704,27 @@ service cloud.firestore {
         allow read: if true; // the diner's client scores recommendations locally
         allow write: if false;
       }
+      // Shape-checked but not semantically verified — a diner's client could
+      // still log an impression it never showed. That is an acceptable gap for
+      // a metrics stream nobody bills against or grants access from; it is not
+      // acceptable to leave the field set and types completely open, which is
+      // what "allow create: if true" on its own did.
+      function recEventWellFormed() {
+        let d = request.resource.data;
+        return d.get('type', '') in ['impression', 'add']
+          && d.createdAt is number
+          && (
+            (d.type == 'impression'
+              && d.keys().hasOnly(['type', 'itemIds', 'createdAt'])
+              && d.itemIds is list && d.itemIds.size() > 0 && d.itemIds.size() <= 5)
+            || (d.type == 'add'
+              && d.keys().hasOnly(['type', 'itemId', 'createdAt'])
+              && d.itemId is string && d.itemId != '')
+          );
+      }
       match /recEvents/{eventId} {
         allow read: if canManageOutlet(outletId);
-        allow create: if true; // impression / add logging, from the diner's client
+        allow create: if recEventWellFormed(); // impression / add logging, from the diner's client
         allow update, delete: if false;
       }
     }

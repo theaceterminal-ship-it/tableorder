@@ -10,10 +10,12 @@
     "test": "npm run lint:undef && vitest run --exclude \"**/rules/**\" --exclude \"**/node_modules/**\"",
     "test:watch": "vitest",
     "test:rules": "node scripts/test-rules.mjs",
-    "lint:undef": "eslint --no-config-lookup -c undef.config.mjs app lib"
+    "lint:undef": "eslint --no-config-lookup -c undef.config.mjs app lib",
+    "build:rec-models": "node scripts/build-rec-models.mjs"
   },
   "dependencies": {
     "firebase": "^12.16.0",
+    "firebase-admin": "^14.3.0",
     "jszip": "^3.10.1",
     "next": "16.2.12",
     "react": "19.2.4",

@@ -7,6 +7,8 @@ import { db } from "@/lib/firebase";
 import { collection, addDoc, setDoc, updateDoc, doc, onSnapshot, query, where, orderBy, writeBatch } from "firebase/firestore";
 import { computeOfferPrice, computeBogoDiscount, receiptFor } from "@/lib/pricing";
 import { mergeItemLines, tableSessionWindowStart } from "@/lib/orders";
+import { recommendationsFor } from "@/lib/recommendations";
+import { useRecModel } from "@/lib/use-outlet-data";
 import {
   ORDER_TYPES, DELIVERY_TABLE, validateDeliveryDetails, normalizePhone,
   deliveryTimeline, deliveryStage, isDeliveryComplete, DELIVERY_STAGES,
@@ -39,16 +41,6 @@ const CATEGORY_ICONS = {
 
 // NEW: catchy background palette for the "Loved by Everyone" spotlight carousel.
 const SPOTLIGHT_COLORS = ["#FFF4E0", "#E7F8EF", "#EAF1FF", "#FDEAF0", "#F3ECFF"];
-
-const MEAL_COMPLETION_RULES = {
-  "Mains": { needs: ["Breads & Rice", "Bread", "Rice", "Breads"], suggestCategory: "Breads & Rice" },
-  "Main Course": { needs: ["Breads & Rice", "Bread", "Rice", "Breads"], suggestCategory: "Breads & Rice" },
-  "North Indian": { needs: ["Breads & Rice", "Bread", "Rice", "Breads"], suggestCategory: "Breads & Rice" },
-  "Biryani": { needs: ["Beverages", "Drinks", "Mocktails"], suggestCategory: "Beverages" },
-  "Starters": { needs: ["Mains", "Main Course", "North Indian", "Chinese"], suggestCategory: "Mains" },
-  "Chinese": { needs: ["Beverages", "Drinks"], suggestCategory: "Beverages" },
-  "Indo Chinese": { needs: ["Beverages", "Drinks"], suggestCategory: "Beverages" },
-};
 
 const WAITER_REASONS = [
   { key: "water", icon: "💧", label: "Water" },
@@ -524,23 +516,49 @@ function StatusToast({ emoji, msg }) {
 // "People also ordered" — exactly 2 items, each a full mini product card
 // (photo, name, price, + button) so it's an attractive tap target, not a
 // skinny scroll strip.
-function PeopleAlsoOrderedBanner({ cart, menuItems, onAdd, compact }) {
-  const cartItemIds = new Set(Object.values(cart).map((l) => l.itemId));
-  const cartCategories = new Set();
-  cartItemIds.forEach((id) => {
-    const item = menuItems.find((m) => m.id === id);
-    if (item) cartCategories.add(item.category);
-  });
+// "People also ordered" — driven by lib/recommendations.js rather than the
+// two heuristics this replaced (a same-category-or-featured filter, and a
+// hand-typed table covering six category names that did nothing for any
+// category spelled differently — which was most of them). One real engine,
+// blending this outlet's own order history with a category-complement prior
+// so a brand-new outlet still gets sensible suggestions from day one.
+function PeopleAlsoOrderedBanner({ cart, menuItems, onAdd, compact, recModel, restaurantId }) {
+  const cartItemIds = useMemo(() => Object.values(cart).map((l) => l.itemId), [cart]);
+  const suggestions = useMemo(
+    () => recommendationsFor({ cartItemIds, model: recModel, menuItems, limit: 2 }),
+    [cartItemIds, recModel, menuItems],
+  );
 
-  const suggestions = menuItems
-    .filter((m) => {
-      if (cartItemIds.has(m.id)) return false;
-      if (!m.available) return false;
-      return cartCategories.has(m.category) || m.featured;
-    })
-    .slice(0, 2);
+  // Logged once per distinct suggestion SET, not on every render — the cart
+  // re-renders on nearly every interaction, and logging that would flood the
+  // event log with noise instead of the signal it exists to capture. This is
+  // instrumentation only: nothing here changes what the customer sees. It
+  // exists so a later pass can measure whether a recommendation shown here
+  // actually led to an add, rather than assuming the model is working.
+  const shownKey = suggestions.map((s) => s.id).join(",");
+  const loggedKeyRef = useRef("");
+  useEffect(() => {
+    if (!shownKey || !restaurantId || loggedKeyRef.current === shownKey) return;
+    loggedKeyRef.current = shownKey;
+    addDoc(collection(db, "restaurants", restaurantId, "recEvents"), {
+      type: "impression",
+      itemIds: suggestions.map((s) => s.id),
+      createdAt: Date.now(),
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shownKey, restaurantId]);
 
   if (suggestions.length === 0) return null;
+
+  function handleAdd(item) {
+    playTone(680, 90, "triangle");
+    onAdd(item.id, 1);
+    if (restaurantId) {
+      addDoc(collection(db, "restaurants", restaurantId, "recEvents"), {
+        type: "add", itemId: item.id, createdAt: Date.now(),
+      }).catch(() => {});
+    }
+  }
 
   return (
     <div className="rec-banner" style={{ margin: compact ? "0 0 16px" : "0 20px 20px" }}>
@@ -558,7 +576,7 @@ function PeopleAlsoOrderedBanner({ cart, menuItems, onAdd, compact }) {
                 <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26 }}>🍽️</div>
               )}
               <button
-                onClick={() => { playTone(680, 90, "triangle"); onAdd(item.id, 1); }}
+                onClick={() => handleAdd(item)}
                 className="tap-btn"
                 style={{ position: "absolute", bottom: -14, right: 8, width: 30, height: 30, borderRadius: "50%", border: "none", background: "#e8a33d", color: "#1a1a2e", fontSize: 17, fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px rgba(232,163,61,0.4)" }}
               >
@@ -571,59 +589,6 @@ function PeopleAlsoOrderedBanner({ cart, menuItems, onAdd, compact }) {
             </div>
           </div>
         ))}
-      </div>
-    </div>
-  );
-}
-
-// "Complete your meal" — one attractive photo card instead of a thin text row.
-function CompleteMealBanner({ cart, menuItems, onAdd, compact }) {
-  const cartItemIds = new Set(Object.values(cart).map((l) => l.itemId));
-  const cartItems = menuItems.filter((m) => cartItemIds.has(m.id));
-
-  let missingCategory = null;
-  for (const item of cartItems) {
-    const rule = MEAL_COMPLETION_RULES[item.category];
-    if (rule) {
-      const hasComplement = cartItems.some((m) => rule.needs.includes(m.category));
-      if (!hasComplement) {
-        missingCategory = rule.suggestCategory;
-        break;
-      }
-    }
-  }
-
-  if (!missingCategory) return null;
-
-  const suggestion = menuItems.find((m) => m.category === missingCategory && m.available && !cartItemIds.has(m.id));
-  if (!suggestion) return null;
-
-  return (
-    <div className="rec-banner" style={{ margin: compact ? "0 0 16px" : "0 20px 20px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
-        <span style={{ fontSize: 15 }}>🍽️</span>
-        <span style={{ fontSize: 13, fontWeight: 800, color: "#166534" }}>Complete your meal</span>
-      </div>
-      <div style={{ background: "#fff", borderRadius: 14, overflow: "hidden", border: "1px solid #bbf7d0", boxShadow: "0 2px 10px rgba(0,0,0,0.05)", display: "flex", alignItems: "center", gap: 12, padding: 10 }}>
-        <div style={{ width: 64, height: 64, borderRadius: 12, overflow: "hidden", flexShrink: 0, background: "#f0fdf4" }}>
-          {suggestion.imageUrl ? (
-            <img src={suggestion.imageUrl} alt={suggestion.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-          ) : (
-            <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>🍽️</div>
-          )}
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: "#1a1a2e", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{suggestion.name}</div>
-          <div style={{ fontSize: 11, color: "#888" }}>Pairs perfectly with your order</div>
-          <div style={{ fontSize: 13, fontWeight: 800, color: "#16a34a", marginTop: 2 }}>₹{suggestion.price}</div>
-        </div>
-        <button
-          onClick={() => { playTone(680, 90, "triangle"); onAdd(suggestion.id, 1); }}
-          className="tap-btn"
-          style={{ padding: "8px 16px", borderRadius: 10, border: "none", background: "#16a34a", color: "#fff", fontWeight: 800, fontSize: 12.5, cursor: "pointer", flexShrink: 0 }}
-        >
-          + Add
-        </button>
       </div>
     </div>
   );
@@ -669,6 +634,10 @@ export function TableContent({ mode = "table" }) {
   const searchParams = useSearchParams();
   const tableParam = searchParams.get("table");
   const restaurantId = searchParams.get("restaurant");
+  // Precomputed by scripts/build-rec-models.mjs, not by this page — null until
+  // that job has run once for this outlet, which lib/recommendations.js treats
+  // as "no data yet" rather than an error.
+  const recModel = useRecModel(restaurantId);
   // The token from the QR code. Proves this device is actually at the table —
   // see lib/table-session.js. Absent for delivery, which has its own gate.
   const tableToken = searchParams.get("t") || "";
@@ -1465,8 +1434,10 @@ export function TableContent({ mode = "table" }) {
         {count > 0 && (
           <div style={{ marginTop: 18 }}>
             <ThresholdBanner cartTotal={displayTotal} activeOffer={thresholdBannerOffer} compact />
-            <CompleteMealBanner cart={cart} menuItems={menuItems} onAdd={addToCart} compact />
-            <PeopleAlsoOrderedBanner cart={cart} menuItems={menuItems} onAdd={addToCart} compact />
+            <PeopleAlsoOrderedBanner
+              cart={cart} menuItems={menuItems} onAdd={addToCart} compact
+              recModel={recModel} restaurantId={restaurantId}
+            />
           </div>
         )}
 
