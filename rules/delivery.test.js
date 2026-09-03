@@ -223,3 +223,48 @@ describe("the rider roster", () => {
       { name: "Ramesh", phone: "9876543210", active: false }, { merge: true }));
   });
 });
+
+describe("who is carrying a delivery", () => {
+  // This split exists precisely to fix a real exposure: rider name and phone
+  // used to live directly on the order document, and orders are broadly
+  // listable -- so anyone querying the collection, not just someone tracking
+  // one known order, could enumerate every rider an outlet has ever used.
+  const RIDER_ORDER_ID = "ord_rider_1";
+  const assignment = { name: "Ramesh", phone: "9876543210", createdAt: Date.now() };
+
+  it("lets a customer fetch the ONE assignment for their own known order id", async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), "restaurants", OUTLET, "riderAssignments", RIDER_ORDER_ID), assignment);
+    });
+    await assertSucceeds(getDoc(doc(anon(), "restaurants", OUTLET, "riderAssignments", RIDER_ORDER_ID)));
+  });
+
+  it("refuses an anonymous client listing the whole collection", async () => {
+    // The actual fix. Fetching one known id is tracking your own order;
+    // listing the collection is enumerating every rider this outlet has used.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), "restaurants", OUTLET, "riderAssignments", RIDER_ORDER_ID), assignment);
+    });
+    await assertFails(getDocs(collection(anon(), "restaurants", OUTLET, "riderAssignments")));
+  });
+
+  it("lets reception list the collection", async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), "restaurants", OUTLET, "riderAssignments", RIDER_ORDER_ID), assignment);
+    });
+    await assertSucceeds(getDocs(collection(as(RECEPTION), "restaurants", OUTLET, "riderAssignments")));
+  });
+
+  it("lets reception write an assignment at dispatch", async () => {
+    await assertSucceeds(setDoc(doc(as(RECEPTION), "restaurants", OUTLET, "riderAssignments", RIDER_ORDER_ID), assignment));
+  });
+
+  it("refuses an anonymous client writing one", async () => {
+    await assertFails(setDoc(doc(anon(), "restaurants", OUTLET, "riderAssignments", RIDER_ORDER_ID), assignment));
+  });
+
+  it("refuses an outsider entirely", async () => {
+    await assertFails(getDocs(collection(as(OUTSIDER), "restaurants", OUTLET, "riderAssignments")));
+    await assertFails(setDoc(doc(as(OUTSIDER), "restaurants", OUTLET, "riderAssignments", RIDER_ORDER_ID), assignment));
+  });
+});

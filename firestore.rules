@@ -552,6 +552,27 @@ service cloud.firestore {
         allow read, write: if canWorkOutlet(outletId);
       }
 
+      // WHO is carrying a specific delivery, kept off the order document
+      // itself for the same reason deliveryDetails is: orders are broadly
+      // listable (see the note above /orders), and a rider's name and phone
+      // number were briefly living there, which meant anyone who queried the
+      // orders collection broadly -- not just someone tracking a single known
+      // order -- could enumerate every rider this outlet has ever used.
+      //
+      // The split mirrors deliveryDetails but is NOT as strict: that customer
+      // PII is gated behind phone verification because outlets sometimes want
+      // it that tight. A rider's name and a callback number carry a lower bar
+      // -- the customer already sees this on the printed bill their food
+      // arrives with -- so `get` (fetching ONE assignment by its own order id,
+      // exactly how the tracker screen already works) stays open. What is
+      // closed off is `list`: nobody can enumerate every assignment this
+      // outlet has ever made without already being staff.
+      match /riderAssignments/{orderId} {
+        allow get: if true;
+        allow list: if canWorkOutlet(outletId);
+        allow write: if canWorkOutlet(outletId);
+      }
+
       // profile and settings are public (name, logo, veg flag, review link).
       // billing holds the outlet's UPI id and tax configuration — staff only.
       match /info/{docId} {

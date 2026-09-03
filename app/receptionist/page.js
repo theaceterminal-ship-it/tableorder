@@ -19,6 +19,7 @@ import {
   useOrders, useMenuItems, useCategories, useTables, useFloors,
   useOfferBanners, useBundleRules, useWaiterCalls, useCustomers,
   useStaff, useBillCustomers, useOutletInfo, useDeliveryDetails, useTableSessions, useRiders,
+  useRiderAssignments,
 } from "@/lib/use-outlet-data";
 import { db } from "@/lib/firebase";
 import { uploadToCloudinary } from "@/lib/cloudinary";
@@ -124,7 +125,7 @@ function StatCard({ label, value, color, sub, onClick }) {
 // A party across tables 1 and 2 is ONE group of guests eating together and one
 // bill, so showing it as two unrelated cards is both confusing on a busy floor
 // and how you end up handing them two bills.
-function OrderCard({ order, children, onMoveClick, groupTables, sourceTables, delivery }) {
+function OrderCard({ order, children, onMoveClick, groupTables, sourceTables, delivery, rider }) {
   const isGroup = groupTables && groupTables.length > 1;
   const typeMeta = orderTypeMeta(order.orderType);
   const forDelivery = isDelivery(order);
@@ -154,12 +155,12 @@ function OrderCard({ order, children, onMoveClick, groupTables, sourceTables, de
         </div>
         <span style={{ fontSize: 11.5, color: "var(--text-secondary, #6b6b7b)" }}>{new Date(order.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
       </div>
-      {forDelivery && order.riderName && (
+      {forDelivery && rider?.name && (
         <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 10, padding: "8px 11px", marginBottom: 10, fontSize: 12.5, color: "#166534", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <span style={{ fontWeight: 800 }}>
-            {order.deliveredAt ? "✓ Delivered by" : "🛵 Out with"} {order.riderName}
+            {order.deliveredAt ? "✓ Delivered by" : "🛵 Out with"} {rider.name}
           </span>
-          <a href={`tel:${order.riderPhone}`} style={{ color: "#166534", textDecoration: "underline" }}>{order.riderPhone}</a>
+          <a href={`tel:${rider.phone}`} style={{ color: "#166534", textDecoration: "underline" }}>{rider.phone}</a>
         </div>
       )}
       {/* A rider cannot deliver from a ticket that does not say where to. */}
@@ -413,6 +414,7 @@ function ReceptionPage() {
   const customers = useCustomers(restaurantId);
   const staffList = useStaff(restaurantId);
   const riders = useRiders(restaurantId);
+  const riderAssignments = useRiderAssignments(restaurantId);
   const billCustomers = useBillCustomers(restaurantId);
   // Where each delivery order is going. Kept off the order document because
   // orders are publicly readable; see firestore.rules.
@@ -1179,13 +1181,18 @@ function ReceptionPage() {
           paymentMethod: details?.paymentMethod === "upi" ? "upi" : "cash",
         });
       }
+      // Copied from the roster entry at this moment, not referenced by id —
+      // the tracker and the printed bill should keep showing exactly who
+      // picked up this order even if the roster changes later. Written to its
+      // own collection, not onto the order: orders are broadly listable, and
+      // a rider's phone number has no reason to be enumerable alongside them.
+      await setDoc(doc(db, "restaurants", restaurantId, "riderAssignments", o.id), {
+        name: rider.name,
+        phone: rider.phone,
+        createdAt: Date.now(),
+      });
       await updateDoc(doc(db, "restaurants", restaurantId, "orders", o.id), {
         dispatchedAt: Date.now(),
-        // Copied from the roster entry at this moment, not referenced by id —
-        // the customer's tracker and the printed bill should keep showing
-        // exactly who picked up this order even if the roster changes later.
-        riderName: rider.name,
-        riderPhone: rider.phone,
       });
       setDispatchOrder(null);
       setSelectedRiderId("");
@@ -2642,7 +2649,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                 {/* Actions apply to every order in the party, so confirming a
                     merged table sends all of it to the kitchen at once. */}
                 {orderFilter === "pending" && currentData.map((g) => (
-                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]}>
+                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]} rider={riderAssignments[g.rep.id]}>
                     <button className="btn btn-sm btn-danger" style={{ flex: 1 }}
                       onClick={() => g.orders.forEach((o) => declineOrder(o.id))}>Decline</button>
                     <button className="btn btn-sm btn-primary" style={{ flex: 1 }}
@@ -2650,7 +2657,7 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                   </OrderCard>
                 ))}
                 {orderFilter === "active" && currentData.map((g) => (
-                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]} onMoveClick={g.tables.length > 1 ? undefined : openMoveOrder}>
+                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]} rider={riderAssignments[g.rep.id]} onMoveClick={g.tables.length > 1 ? undefined : openMoveOrder}>
                     {nextDeliveryAction(g.rep) === "dispatch" ? (
                       <button className="btn btn-sm btn-primary" style={{ width: "100%" }}
                         onClick={() => { setDispatchOrder(g.rep); setSelectedRiderId(""); setRiderErrors({}); }}>
@@ -2683,14 +2690,14 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                   </OrderCard>
                 ))}
                 {orderFilter === "served" && currentData.map((g) => (
-                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]}>
+                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]} rider={riderAssignments[g.rep.id]}>
                     <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(g.rep)} style={{ flex: 1 }}>
                       Generate {g.tables.length > 1 ? "one bill" : "Bill"}
                     </button>
                   </OrderCard>
                 ))}
                 {orderFilter === "billRequested" && currentData.map((g) => (
-                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]}>
+                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]} rider={riderAssignments[g.rep.id]}>
                     <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(g.rep)} style={{ flex: 1 }}>
                       Generate {g.tables.length > 1 ? "one bill" : "Bill"}
                     </button>

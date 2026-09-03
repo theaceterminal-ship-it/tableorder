@@ -655,6 +655,12 @@ export function TableContent({ mode = "table" }) {
   const [payMethod, setPayMethod] = useState("cod");
   const [placedOrderId, setPlacedOrderId] = useState(null);
   const [trackedOrder, setTrackedOrder] = useState(null);
+  // Who is carrying this order, if it has been dispatched. A separate
+  // document, not a field on the order itself: orders are broadly listable,
+  // and a rider's phone number has no reason to be enumerable alongside them.
+  // Fetching one assignment by its own order id stays open by rule — the
+  // same trust level the order id itself already carries.
+  const [rider, setRider] = useState(null);
   const [website, setWebsite] = useState(DEFAULT_WEBSITE);
   const [tableSession, setTableSession] = useState(undefined); // undefined = still loading
   const [orderError, setOrderError] = useState("");
@@ -789,6 +795,7 @@ export function TableContent({ mode = "table" }) {
         }
         const data = { id: snap.id, ...snap.data() };
         setTrackedOrder(data);
+        if (!data.dispatchedAt) setRider(null);
         // Once the food has arrived the journey is over — the stored id is
         // dropped so the NEXT visit starts at the menu. The screen itself stays
         // up for this visit, showing "Delivered", rather than vanishing from
@@ -798,6 +805,16 @@ export function TableContent({ mode = "table" }) {
         }
       },
       () => setTrackedOrder(null),
+    );
+    return () => unsub();
+  }, [restaurantId, placedOrderId]);
+
+  useEffect(() => {
+    if (!restaurantId || !placedOrderId) { setRider(null); return; }
+    const unsub = onSnapshot(
+      doc(db, "restaurants", restaurantId, "riderAssignments", placedOrderId),
+      (snap) => setRider(snap.exists() ? snap.data() : null),
+      () => setRider(null),
     );
     return () => unsub();
   }, [restaurantId, placedOrderId]);
@@ -1598,15 +1615,15 @@ export function TableContent({ mode = "table" }) {
 
           {/* Being able to call the person carrying your dinner is most of the
               value of a tracking screen. */}
-          {placed?.riderName && !arrived && (
+          {rider?.name && !arrived && (
             <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 16, padding: 16, marginBottom: 20, textAlign: "left", display: "flex", alignItems: "center", gap: 12 }}>
               <div style={{ width: 42, height: 42, borderRadius: "50%", background: "#16a34a", color: "#fff", display: "grid", placeItems: "center", fontSize: 19, flexShrink: 0 }}>🛵</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 11.5, fontWeight: 800, color: "#166534", textTransform: "uppercase", letterSpacing: 0.4 }}>Your rider</div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: "#1a1a2e" }}>{placed.riderName}</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: "#1a1a2e" }}>{rider.name}</div>
               </div>
-              {placed.riderPhone && (
-                <a href={`tel:${placed.riderPhone}`} className="tap-btn"
+              {rider.phone && (
+                <a href={`tel:${rider.phone}`} className="tap-btn"
                   style={{ background: "#16a34a", color: "#fff", padding: "10px 16px", borderRadius: 12, fontSize: 13.5, fontWeight: 700, textDecoration: "none", flexShrink: 0 }}>
                   Call
                 </a>
