@@ -9,10 +9,23 @@
 // Off by design until a DSN exists — see lib/sentry-config.js.
 
 import * as Sentry from "@sentry/nextjs";
-import { sentryInitOptions, sentryEnabled } from "./lib/sentry-config.js";
+import { sentryInitOptions } from "./lib/sentry-config.js";
 
-if (sentryEnabled()) {
-  Sentry.init(sentryInitOptions());
+// This exact expression — process.env.NEXT_PUBLIC_SENTRY_DSN, written out in
+// full, right here — is what lets Next.js inline the real value into the
+// browser bundle at build time. It replaces this literal text; it does not
+// give the browser a working process.env object to read from generally. The
+// pure, tested sentryDsn()/sentryEnabled() helpers in lib/sentry-config.js
+// take an env PARAMETER instead of reading process.env directly, which is
+// exactly right for server code (Node always has real env vars, however you
+// reach them) but is invisible to this build-time substitution here — a
+// silent miss that shows up as Sentry.init() correctly compiled into the
+// bundle but never actually enabled — the code is present, the condition
+// guarding it just never resolves true.
+const dsn = process.env.NEXT_PUBLIC_SENTRY_DSN;
+
+if (dsn) {
+  Sentry.init(sentryInitOptions({ NEXT_PUBLIC_SENTRY_DSN: dsn }));
 }
 
 // Required by the SDK so navigation between pages shows up as its own trace
