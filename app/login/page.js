@@ -214,7 +214,12 @@ function LoginPageInner() {
           <p style={{ marginTop: 24, fontSize: 12, color: "#aaa" }}>
             New restaurant? <a href="/signup" style={{ color: "#e8a33d", fontWeight: 700, textDecoration: "none" }}>Sign up here</a>
           </p>
-          <p style={{ marginTop: 12, fontSize: 12, color: "#aaa" }}>By signing in, you agree to our Terms of Service</p>
+          <p style={{ marginTop: 12, fontSize: 12, color: "#aaa" }}>
+            By signing in, you agree to our{" "}
+            <a href="/terms" style={{ color: "#aaa", textDecoration: "underline" }}>Terms of Service</a>{" "}
+            and{" "}
+            <a href="/privacy" style={{ color: "#aaa", textDecoration: "underline" }}>Privacy Policy</a>
+          </p>
         </div>
       </div>
     );

@@ -1582,6 +1582,15 @@ export function TableContent({ mode = "table" }) {
             ? `Place delivery order · ₹${displayTotal + deliveryFee}`
             : activeOrders.length > 0 ? "Add to Order" : (orderType === "takeaway" ? "Place Takeaway Order" : "Place Order")}
         </button>
+
+        {isDeliveryMode && (
+          <p style={{ fontSize: 11, color: "#aaa", textAlign: "center", marginTop: 12, lineHeight: 1.5 }}>
+            By placing this order you agree to our{" "}
+            <a href="/terms" target="_blank" style={{ color: "#aaa", textDecoration: "underline" }}>Terms</a>
+            {" "}and{" "}
+            <a href="/privacy" target="_blank" style={{ color: "#aaa", textDecoration: "underline" }}>Privacy Policy</a>.
+          </p>
+        )}
       </div>
     </div>
   ) : null;
