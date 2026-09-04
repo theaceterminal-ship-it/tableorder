@@ -432,6 +432,9 @@ function WaiterModal({ onClose, onSend }) {
 }
 
 function RatingPopup({ order, restaurantId, onDone, googleReviewLink }) {
+  // googleReviewLink arrives here already gated by googleReviewEnabled at the
+  // call site — see the three <RatingPopup> usages below — so this component
+  // only ever needs to check whether it received a real link at all.
   const [rating, setRating] = useState(0);
   const [secondsLeft, setSecondsLeft] = useState(10);
   const [submitted, setSubmitted] = useState(false);
@@ -707,6 +710,7 @@ export function TableContent({ mode = "table" }) {
   const [ratingOrder, setRatingOrder] = useState(null);
   const [vegOnly, setVegOnly] = useState(false);
   const [googleReviewLink, setGoogleReviewLink] = useState("");
+  const [googleReviewEnabled, setGoogleReviewEnabled] = useState(false);
   const [bundleRules, setBundleRules] = useState([]); // Smart Deals — same collection reception manages
   const [exploreFilter, setExploreFilter] = useState("all");
   const [showExploreFilter, setShowExploreFilter] = useState(false);
@@ -737,6 +741,7 @@ export function TableContent({ mode = "table" }) {
       if (snap.exists()) {
         const data = snap.data();
         setGoogleReviewLink(data.googleReviewLink || "");
+        setGoogleReviewEnabled(!!data.googleReviewEnabled);
         setWebsite({
           ...DEFAULT_WEBSITE,
           ...(data.website || {}),
@@ -1939,7 +1944,7 @@ export function TableContent({ mode = "table" }) {
     const billSubtotal = o.items.reduce((sum, it) => sum + it.price * it.qty, 0);
     return (
       <div style={{ minHeight: "100vh", background: "#f8f6f3", padding: 24, fontFamily: "sans-serif" }}>
-        {ratingOrder && <RatingPopup order={ratingOrder} restaurantId={restaurantId} onDone={() => setRatingOrder(null)} googleReviewLink={googleReviewLink} />}
+        {ratingOrder && <RatingPopup order={ratingOrder} restaurantId={restaurantId} onDone={() => setRatingOrder(null)} googleReviewLink={googleReviewEnabled ? googleReviewLink : ""} />}
         <div style={{ maxWidth: 480, margin: "0 auto" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
             {profile?.logoUrl && (<img src={profile.logoUrl} alt="logo" style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover" }} />)}
@@ -2014,7 +2019,7 @@ export function TableContent({ mode = "table" }) {
       <div style={{ minHeight: "100vh", background: "#f8f6f3", padding: 24, fontFamily: "sans-serif", paddingBottom: 100 }}>
         {statusToast && <StatusToast emoji={statusToast.emoji} msg={statusToast.msg} />}
         {successOverlay && <SuccessOverlay message={successOverlay} />}
-        {ratingOrder && <RatingPopup order={ratingOrder} restaurantId={restaurantId} onDone={() => setRatingOrder(null)} googleReviewLink={googleReviewLink} />}
+        {ratingOrder && <RatingPopup order={ratingOrder} restaurantId={restaurantId} onDone={() => setRatingOrder(null)} googleReviewLink={googleReviewEnabled ? googleReviewLink : ""} />}
         <div style={{ maxWidth: 480, margin: "0 auto" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
             {profile?.logoUrl && (<img src={profile.logoUrl} alt="logo" style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover" }} />)}
@@ -2195,7 +2200,7 @@ export function TableContent({ mode = "table" }) {
           initialAddonIds={editingLineId ? (cart[editingLineId]?.addonIds || []) : []}
         />
       )}
-      {ratingOrder && <RatingPopup order={ratingOrder} restaurantId={restaurantId} onDone={() => setRatingOrder(null)} googleReviewLink={googleReviewLink} />}
+      {ratingOrder && <RatingPopup order={ratingOrder} restaurantId={restaurantId} onDone={() => setRatingOrder(null)} googleReviewLink={googleReviewEnabled ? googleReviewLink : ""} />}
       {showWaiterModal && <WaiterModal onClose={() => setShowWaiterModal(false)} onSend={callWaiter} />}
 
       {/* ===== HEADER: Call Waiter (top-left) · Logo/name · Table pill (top-right) ===== */}

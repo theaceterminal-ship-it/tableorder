@@ -433,6 +433,7 @@ function ReceptionPage() {
     hasBar: !!settingsDoc?.hasBar,
     pureVeg: !!settingsDoc?.pureVeg,
     googleReviewLink: settingsDoc?.googleReviewLink || "",
+    googleReviewEnabled: !!settingsDoc?.googleReviewEnabled,
     thresholdMostLoved: settingsDoc?.thresholdMostLoved ?? 4.5,
     thresholdMostOrdered: settingsDoc?.thresholdMostOrdered ?? 100,
     thresholdMostRated: settingsDoc?.thresholdMostRated ?? 50,
@@ -559,7 +560,7 @@ function ReceptionPage() {
   const [posVariantModal, setPosVariantModal] = useState(null); // { item, variationId, addonIds, qty }
 
   // --- NEW: extra settings (bar toggle + badge thresholds) ---
-  const [siteSettingsForm, setSiteSettingsForm] = useState({ hasBar: false, pureVeg: false, googleReviewLink: "", thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50 });
+  const [siteSettingsForm, setSiteSettingsForm] = useState({ hasBar: false, pureVeg: false, googleReviewLink: "", googleReviewEnabled: false, thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50 });
   const [siteSettingsSaved, setSiteSettingsSaved] = useState(false);
 
   // --- NEW: Offer Carousel (replaces the old auto Hero Carousel) ---
@@ -951,6 +952,7 @@ function ReceptionPage() {
       hasBar: !!siteSettingsForm.hasBar,
       pureVeg: !!siteSettingsForm.pureVeg,
       googleReviewLink: siteSettingsForm.googleReviewLink.trim(),
+      googleReviewEnabled: !!siteSettingsForm.googleReviewEnabled,
       thresholdMostLoved: parseFloat(siteSettingsForm.thresholdMostLoved) || 4.5,
       thresholdMostOrdered: parseInt(siteSettingsForm.thresholdMostOrdered) || 100,
       thresholdMostRated: parseInt(siteSettingsForm.thresholdMostRated) || 50,
@@ -3766,11 +3768,19 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
           onChange={(e) => setSiteSettingsForm((p) => ({ ...p, googleReviewLink: e.target.value }))}
           style={inputStyle}
         />
-        <p style={{ fontSize: 11.5, color: "#999", marginTop: -6, marginBottom: 18 }}>
+        <p style={{ fontSize: 11.5, color: "#999", marginTop: -6, marginBottom: 14 }}>
           Find this on your Google Business Profile under "Ask for reviews" — it is a link, not your
-          business's public listing URL. Once set, a customer who rates their order in the app is
-          offered a one-tap "Rate us on Google" button right after. Leave blank to skip that step;
-          the in-app star rating is still collected either way.
+          business's public listing URL.
+        </p>
+        <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13.5, fontWeight: 600, cursor: "pointer", marginBottom: 18 }}>
+          <input type="checkbox" checked={!!siteSettingsForm.googleReviewEnabled} onChange={(e) => setSiteSettingsForm((p) => ({ ...p, googleReviewEnabled: e.target.checked }))} />
+          ⭐ Prompt customers to rate us on Google
+        </label>
+        <p style={{ fontSize: 11.5, color: "#999", marginTop: -14, marginBottom: 18 }}>
+          When on, a customer who rates their order in the app is offered a one-tap "Rate us on
+          Google" button right after — the in-app star rating is still collected either way. Turning
+          this off hides the button without losing the link you saved above, so you can switch it
+          back on later without re-typing it.
         </p>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
