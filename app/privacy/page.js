@@ -13,7 +13,7 @@ export default function PrivacyPolicy() {
       <div style={card}>
         <div style={{ fontSize: 32, marginBottom: 8 }}>🍽️</div>
         <h1 style={{ fontSize: 26, fontWeight: 800, color: "#1a1a2e", margin: "0 0 6px" }}>Privacy Policy</h1>
-        <p style={{ ...p, color: "#999", fontSize: 13 }}>Last updated: <span style={placeholder}>[date you publish this]</span></p>
+        <p style={{ ...p, color: "#999", fontSize: 13 }}>Last updated: 4 September 2026</p>
 
         <div style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 12, padding: 14, margin: "18px 0", fontSize: 13, lineHeight: 1.6, color: "#92400e" }}>
           This describes, accurately, what Cabadra's software actually collects and does with data —
@@ -24,9 +24,9 @@ export default function PrivacyPolicy() {
         </div>
 
         <p style={p}>
-          <span style={placeholder}>[Your business/company name]</span> ("Cabadra", "we", "us") operates
-          the Cabadra ordering platform, used by restaurants to take orders — at the table, for pickup,
-          and for delivery. This policy explains what we collect from you, why, and what you can do about it.
+          Cabadra ("we", "us") operates the Cabadra ordering platform, used by restaurants to take
+          orders — at the table, for pickup, and for delivery. This policy explains what we collect
+          from you, why, and what you can do about it.
         </p>
 
         <h2 style={h2}>What we collect</h2>
@@ -85,7 +85,7 @@ export default function PrivacyPolicy() {
         <h2 style={h2}>Your choices</h2>
         <p style={p}>
           To ask what we hold about you, correct it, or have it deleted, contact the restaurant you
-          ordered from, or write to us directly at <span style={placeholder}>[your contact email]</span>.
+          ordered from, or write to us directly at <a href="mailto:theaceterminal@gmail.com" style={{ color: "#e8a33d" }}>theaceterminal@gmail.com</a>.
           We handle these requests manually today; if you do not hear back promptly, please follow up.
         </p>
 
@@ -99,9 +99,9 @@ export default function PrivacyPolicy() {
 
         <h2 style={h2}>Contact</h2>
         <p style={p}>
-          <span style={placeholder}>[Your business/company name]</span><br />
+          Cabadra<br />
           <span style={placeholder}>[Registered address]</span><br />
-          <span style={placeholder}>[Contact email]</span>
+          <a href="mailto:theaceterminal@gmail.com" style={{ color: "#e8a33d" }}>theaceterminal@gmail.com</a>
         </p>
 
         <div style={{ marginTop: 32, paddingTop: 20, borderTop: "1px solid #f0ebe3" }}>

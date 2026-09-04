@@ -13,7 +13,7 @@ export default function TermsOfService() {
       <div style={card}>
         <div style={{ fontSize: 32, marginBottom: 8 }}>🍽️</div>
         <h1 style={{ fontSize: 26, fontWeight: 800, color: "#1a1a2e", margin: "0 0 6px" }}>Terms of Service</h1>
-        <p style={{ ...p, color: "#999", fontSize: 13 }}>Last updated: <span style={placeholder}>[date you publish this]</span></p>
+        <p style={{ ...p, color: "#999", fontSize: 13 }}>Last updated: 4 September 2026</p>
 
         <div style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 12, padding: 14, margin: "18px 0", fontSize: 13, lineHeight: 1.6, color: "#92400e" }}>
           A working starting point, grounded in what the platform actually does — not legal advice,
@@ -22,9 +22,8 @@ export default function TermsOfService() {
         </div>
 
         <p style={p}>
-          These terms govern use of Cabadra ("the platform"), operated by
-          {" "}<span style={placeholder}>[Your business/company name]</span>. By using it — as a
-          restaurant, a member of a restaurant's staff, or a customer placing an order — you agree to them.
+          These terms govern use of Cabadra ("the platform"). By using it — as a restaurant, a member
+          of a restaurant's staff, or a customer placing an order — you agree to them.
         </p>
 
         <h2 style={h2}>What Cabadra is</h2>
@@ -85,9 +84,9 @@ export default function TermsOfService() {
 
         <h2 style={h2}>Contact</h2>
         <p style={p}>
-          <span style={placeholder}>[Your business/company name]</span><br />
+          Cabadra<br />
           <span style={placeholder}>[Registered address]</span><br />
-          <span style={placeholder}>[Contact email]</span>
+          <a href="mailto:theaceterminal@gmail.com" style={{ color: "#e8a33d" }}>theaceterminal@gmail.com</a>
         </p>
 
         <div style={{ marginTop: 32, paddingTop: 20, borderTop: "1px solid #f0ebe3" }}>
