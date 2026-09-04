@@ -175,7 +175,7 @@ function MenuCard({ item, qty, onAdd, onOpenDetail, width }) {
               <span style={{ background: "#1a1a2e", color: "#fff", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 100 }}>COMBO</span>
             )}
             {item.bogoEnabled && (
-              <span style={{ background: "#16a34a", color: "#fff", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 100 }}>🎁 Buy 1 Get 1 Free</span>
+              <span style={{ background: "#16a34a", color: "#fff", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 100 }}>Buy 1 Get 1 Free</span>
             )}
           </div>
         )}
@@ -314,7 +314,7 @@ function ItemDetailModal({ item, onClose, onAdd, startMode = "view", initialNote
             <p style={{ fontSize: 14, color: "#555", lineHeight: 1.5, marginTop: 12, marginBottom: 6 }}>{item.description || "No description available."}</p>
             {item.bogoEnabled && (
               <div style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#dcfce7", color: "#166534", fontSize: 12, fontWeight: 800, padding: "6px 12px", borderRadius: 100, marginTop: 4 }}>
-                🎁 Buy 1 Get 1 Free
+                Buy 1 Get 1 Free
               </div>
             )}
             {sizeAddonBlock}
@@ -620,7 +620,6 @@ function ThresholdBanner({ cartTotal, activeOffer, compact }) {
   return (
     <div className="rec-banner" style={{ margin: compact ? "0 0 12px" : "0 20px 20px", background: "linear-gradient(135deg, #fef3c7 0%, #fff5e0 100%)", borderRadius: compact ? 12 : 16, padding: compact ? 12 : 16, border: "1px solid #fde68a" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: compact ? 16 : 20 }}>🎁</span>
         <div>
           <div style={{ fontSize: compact ? 12 : 13, fontWeight: 800, color: "#92400e" }}>Add ₹{remaining} more & get FREE {activeOffer.freeItemName || "dessert"}!</div>
           {!compact && <div style={{ fontSize: 11, color: "#a08a5c" }}>Do not miss out — you are so close!</div>}
@@ -1283,46 +1282,56 @@ export function TableContent({ mode = "table" }) {
   // The security rule already reflects that — a diner may only move their
   // own order to bill_requested from "pending" or "served", nothing else.
   //
-  // So this always does the one thing that is unconditionally allowed —
-  // raise a waiter call, the only diner-writable collection with no
-  // preconditions on it at all — and additionally, best-effort, folds any
-  // already-served orders into a real bill_requested order so reception's
-  // Bill Requested tab is populated immediately whenever that is possible.
-  // The waiter call is the guarantee; the order transition is the bonus.
+  // Two entirely different things happen here, and never both at once.
+  //
+  // With something already served, this becomes a REAL bill_requested order
+  // — reception already sees and is notified of that through its own Bill
+  // Requested tab, so also raising a waiter call for the same event would be
+  // a duplicate alert for one thing that happened once.
+  //
+  // With nothing served yet, there is no order to create at all — the only
+  // thing this CAN do is ping reception directly, so it falls back to a
+  // waiter call, the one diner-writable collection with no preconditions on
+  // it whatsoever.
+  //
   // `billDetails` — { name, phone, paymentMethod } — comes from the modal
-  // shown when there is something to actually bill (see the button below).
-  // Written to its own staff-only document, not onto the order: exactly the
-  // same reasoning as deliveryDetails, and reception's Generate Bill modal
-  // already knows to look there for it.
+  // shown when there is something to actually bill. Written to its own
+  // staff-only document, not onto the order: exactly the same reasoning as
+  // deliveryDetails, and reception's Generate Bill modal already knows to
+  // look there for it.
   async function requestBill(billDetails = null) {
     setBillRequestError("");
     setBillRequestSent(false);
 
-    try {
-      await addDoc(collection(db, "restaurants", restaurantId, "waiterCalls"), {
-        table: tableNo, reason: BILL_REQUEST_LABEL, status: "pending", createdAt: Date.now(),
-      });
-      playTone(700, 90, "triangle");
-      setBillRequestSent(true);
-      // Reverts to a tappable button rather than staying confirmed forever —
-      // "whenever they want" means being able to ping again if nobody has
-      // come by yet, not a one-shot action.
-      setTimeout(() => setBillRequestSent(false), 5000);
-    } catch (e) {
-      // This has no preconditions at all, so reaching this means something
-      // more fundamental is wrong (offline, outage) — not a table/session
-      // problem, which is why this message does not try to guess at one.
-      setBillRequestError("Could not reach the restaurant. Check your connection and try again.");
+    const servedOrders = activeOrders.filter((o) => o.status === "served");
+
+    if (servedOrders.length === 0) {
+      try {
+        await addDoc(collection(db, "restaurants", restaurantId, "waiterCalls"), {
+          table: tableNo, reason: BILL_REQUEST_LABEL, status: "pending", createdAt: Date.now(),
+        });
+        playTone(700, 90, "triangle");
+        setBillRequestSent(true);
+        // Reverts to a tappable button rather than staying confirmed forever
+        // — "whenever they want" means being able to ping again if nobody
+        // has come by yet, not a one-shot action.
+        setTimeout(() => setBillRequestSent(false), 5000);
+      } catch (e) {
+        // This has no preconditions at all, so reaching this means something
+        // more fundamental is wrong (offline, outage) — not a table/session
+        // problem, which is why this message does not try to guess at one.
+        setBillRequestError("Could not reach the restaurant. Check your connection and try again.");
+      }
       return;
     }
 
-    const servedOrders = activeOrders.filter((o) => o.status === "served");
-    if (servedOrders.length === 0) return;
-
-    // From here on is the bonus path — a table whose session has since
-    // expired, say, would fail this half silently. That is acceptable: the
-    // guaranteed waiter call above has already reached reception regardless.
-    if (tableToken && tableSession !== undefined && !isSessionOpen(tableSession)) return;
+    // A table whose session has since expired cannot write anything at all
+    // — say so plainly rather than letting the write fail silently, now that
+    // there is no guaranteed waiter call underneath this to fall back on.
+    if (tableToken && tableSession !== undefined && !isSessionOpen(tableSession)) {
+      setBillRequestError("Your table session has ended. Please ask a staff member for help.");
+      return;
+    }
 
     try {
       // Generated up front, the same way a delivery order's id is, so the
@@ -1349,7 +1358,7 @@ export function TableContent({ mode = "table" }) {
       servedOrders.forEach((o) => batch.update(doc(db, "restaurants", restaurantId, "orders", o.id), { status: "merged" }));
       await batch.commit();
     } catch {
-      // Best-effort only — the diner already got their confirmation above.
+      setBillRequestError("Could not send your bill request. Please ask a staff member for help.");
     }
   }
 
@@ -1489,7 +1498,7 @@ export function TableContent({ mode = "table" }) {
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 {item.imageUrl && (<img src={item.imageUrl} alt="" style={{ width: 48, height: 48, borderRadius: 10, objectFit: "cover" }} />)}
                 <div>
-                  <div style={{ fontWeight: 600 }}>{item.name}{line.variationName ? ` — ${line.variationName}` : ""}{item.bogoEnabled ? " 🎁" : ""}</div>
+                  <div style={{ fontWeight: 600 }}>{item.name}{line.variationName ? ` — ${line.variationName}` : ""}</div>
                   <div style={{ fontSize: 13, color: "#888" }}>
                     ₹{unitPrice} × {line.qty}
                     {line.priceOverride != null && line.priceOverride < item.price && <span style={{ color: "#aaa", textDecoration: "line-through", marginLeft: 6 }}>₹{item.price}</span>}
@@ -1542,7 +1551,7 @@ export function TableContent({ mode = "table" }) {
               <span>Subtotal</span><span>₹{total}</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 13.5, fontWeight: 700, color: "#16a34a" }}>
-              <span>🎁 Buy 1 Get 1 Free</span><span>-₹{bogoSavings}</span>
+              <span>Buy 1 Get 1 Free</span><span>-₹{bogoSavings}</span>
             </div>
           </>
         )}
@@ -1972,7 +1981,7 @@ export function TableContent({ mode = "table" }) {
               <div style={{ padding: 20, background: "#f8f6f3" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 6 }}><span style={{ color: "#888" }}>Subtotal</span><span>₹{o.billSubtotal ?? billSubtotal}</span></div>
                 {(o.billDiscounts || []).map((d, i) => (
-                  <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6, color: "#16a34a" }}><span>🎁 {d.name}</span><span>-₹{d.amount}</span></div>
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6, color: "#16a34a" }}><span>{d.name}</span><span>-₹{d.amount}</span></div>
                 ))}
                 {o.billTaxAmount > 0 && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 6, color: "#888" }}><span>Tax ({o.billTaxPercent}%)</span><span>₹{o.billTaxAmount}</span></div>}
                 {o.billServiceAmount > 0 && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 6, color: "#888" }}><span>Service ({o.billServicePercent}%)</span><span>₹{o.billServiceAmount}</span></div>}

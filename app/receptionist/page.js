@@ -559,7 +559,7 @@ function ReceptionPage() {
   const [posVariantModal, setPosVariantModal] = useState(null); // { item, variationId, addonIds, qty }
 
   // --- NEW: extra settings (bar toggle + badge thresholds) ---
-  const [siteSettingsForm, setSiteSettingsForm] = useState({ hasBar: false, pureVeg: false, thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50 });
+  const [siteSettingsForm, setSiteSettingsForm] = useState({ hasBar: false, pureVeg: false, googleReviewLink: "", thresholdMostLoved: 4.5, thresholdMostOrdered: 100, thresholdMostRated: 50 });
   const [siteSettingsSaved, setSiteSettingsSaved] = useState(false);
 
   // --- NEW: Offer Carousel (replaces the old auto Hero Carousel) ---
@@ -950,10 +950,11 @@ function ReceptionPage() {
     await setDoc(doc(db, "restaurants", restaurantId, "info", "settings"), {
       hasBar: !!siteSettingsForm.hasBar,
       pureVeg: !!siteSettingsForm.pureVeg,
+      googleReviewLink: siteSettingsForm.googleReviewLink.trim(),
       thresholdMostLoved: parseFloat(siteSettingsForm.thresholdMostLoved) || 4.5,
       thresholdMostOrdered: parseInt(siteSettingsForm.thresholdMostOrdered) || 100,
       thresholdMostRated: parseInt(siteSettingsForm.thresholdMostRated) || 50,
-    }, { merge: true }); // merge: true — this doc also holds googleReviewLink
+    }, { merge: true });
     setSiteSettingsSaved(true);
     setTimeout(() => setSiteSettingsSaved(false), 2000);
   }
@@ -3757,6 +3758,21 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
         <p style={{ fontSize: 11.5, color: "#999", marginTop: -2, marginBottom: 18 }}>
           When on, "Non-veg" is removed everywhere — the veg/non-veg picker, indicator dots, import columns, and every other mention disappear across Menu, POS and imports. New items are always saved as veg.
         </p>
+
+        <label style={labelStyle}>Google Review Link</label>
+        <input
+          placeholder="https://g.page/r/your-restaurant/review"
+          value={siteSettingsForm.googleReviewLink}
+          onChange={(e) => setSiteSettingsForm((p) => ({ ...p, googleReviewLink: e.target.value }))}
+          style={inputStyle}
+        />
+        <p style={{ fontSize: 11.5, color: "#999", marginTop: -6, marginBottom: 18 }}>
+          Find this on your Google Business Profile under "Ask for reviews" — it is a link, not your
+          business's public listing URL. Once set, a customer who rates their order in the app is
+          offered a one-tap "Rate us on Google" button right after. Leave blank to skip that step;
+          the in-app star rating is still collected either way.
+        </p>
+
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
           <div>
             <label style={labelStyle}>Most Loved at ★</label>
