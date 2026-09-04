@@ -49,6 +49,11 @@ const WAITER_REASONS = [
   { key: "seasoning", icon: "🧂", label: "Seasoning / Condiments" },
   { key: "other", icon: "✋", label: "Something else" },
 ];
+// The literal label a waiter call is raised with when a diner taps
+// "Request Bill" on the Status screen — kept as one constant so the trigger
+// and the reception-side icon lookup can never drift out of sync with each
+// other, the way the two separate WAITER_REASONS copies already can.
+const BILL_REQUEST_LABEL = "Request Bill";
 
 function getCategoryIcon(cat, categoryIconMap) {
   if (categoryIconMap && categoryIconMap[cat]) return { type: "image", src: categoryIconMap[cat] };
@@ -668,6 +673,7 @@ export function TableContent({ mode = "table" }) {
   // renders on the menu/cart screen, a different branch of this component,
   // so a Request Bill failure needs its own place to actually be seen.
   const [billRequestError, setBillRequestError] = useState("");
+  const [billRequestSent, setBillRequestSent] = useState(false);
   const [allOrdersRaw, setAllOrdersRaw] = useState([]);
   const [activeOrders, setActiveOrders] = useState([]);
   const [cart, setCart] = useState({});
@@ -1262,43 +1268,63 @@ export function TableContent({ mode = "table" }) {
     triggerSuccessOverlay(activeOrders.length > 0 ? "Added to your order!" : placedMsg);
   }
 
+  // Requesting the bill has to work regardless of what is still cooking — a
+  // table cannot be made to wait on dessert before it is even allowed to ask
+  // to pay. But an order actually in the kitchen's queue (confirmed,
+  // preparing, ready) cannot be silently flipped to "bill_requested" either:
+  // the kitchen board queries for exactly those three statuses, so a status
+  // change here would make food vanish from the kitchen's screen mid-cook.
+  // The security rule already reflects that — a diner may only move their
+  // own order to bill_requested from "pending" or "served", nothing else.
+  //
+  // So this always does the one thing that is unconditionally allowed —
+  // raise a waiter call, the only diner-writable collection with no
+  // preconditions on it at all — and additionally, best-effort, folds any
+  // already-served orders into a real bill_requested order so reception's
+  // Bill Requested tab is populated immediately whenever that is possible.
+  // The waiter call is the guarantee; the order transition is the bonus.
   async function requestBill() {
     setBillRequestError("");
-    const servedOrders = activeOrders.filter((o) => o.status === "served");
-    if (servedOrders.length === 0) return;
+    setBillRequestSent(false);
 
-    // A table given a code but no longer seated is refused by the security
-    // rule same as a fresh order would be — check first so the diner is told
-    // why, rather than tapping a button that quietly does nothing.
-    if (tableToken && tableSession !== undefined && !isSessionOpen(tableSession)) {
-      setBillRequestError(BLOCKED_MESSAGES[tableSession ? "session-expired" : "no-session"]);
+    try {
+      await addDoc(collection(db, "restaurants", restaurantId, "waiterCalls"), {
+        table: tableNo, reason: BILL_REQUEST_LABEL, status: "pending", createdAt: Date.now(),
+      });
+      playTone(700, 90, "triangle");
+      setBillRequestSent(true);
+      // Reverts to a tappable button rather than staying confirmed forever —
+      // "whenever they want" means being able to ping again if nobody has
+      // come by yet, not a one-shot action.
+      setTimeout(() => setBillRequestSent(false), 5000);
+    } catch (e) {
+      // This has no preconditions at all, so reaching this means something
+      // more fundamental is wrong (offline, outage) — not a table/session
+      // problem, which is why this message does not try to guess at one.
+      setBillRequestError("Could not reach the restaurant. Check your connection and try again.");
       return;
     }
 
-    const mergedItems = mergeItemLines(servedOrders.flatMap((o) => o.items));
+    const servedOrders = activeOrders.filter((o) => o.status === "served");
+    if (servedOrders.length === 0) return;
+
+    // From here on is the bonus path — a table whose session has since
+    // expired, say, would fail this half silently. That is acceptable: the
+    // guaranteed waiter call above has already reached reception regardless.
+    if (tableToken && tableSession !== undefined && !isSessionOpen(tableSession)) return;
 
     try {
+      const mergedItems = mergeItemLines(servedOrders.flatMap((o) => o.items));
       await addDoc(collection(db, "restaurants", restaurantId, "orders"), {
         table: tableNo, items: mergedItems, status: "bill_requested", etaMinutes: null, preparingAt: null, createdAt: Date.now(),
-        // This was the actual bug: every other write on this screen attaches
-        // the table's token when it has one, and this write never did — so
-        // on any table protected with a real QR code, the security rule
-        // silently refused it. "Request Bill" looked like it did nothing
-        // because, from Firestore's side, nothing was ever accepted.
         ...(tableToken ? { tableToken } : {}),
       });
 
       const batch = writeBatch(db);
       servedOrders.forEach((o) => batch.update(doc(db, "restaurants", restaurantId, "orders", o.id), { status: "merged" }));
       await batch.commit();
-
-      playTone(700, 90, "triangle");
-    } catch (e) {
-      // A silent failure here reads to the diner as a broken button. Whatever
-      // the cause, they see something rather than nothing.
-      setBillRequestError(e?.code === "permission-denied"
-        ? "We could not send that to the restaurant. Please call a staff member."
-        : "Something went wrong requesting your bill. Please try again.");
+    } catch {
+      // Best-effort only — the diner already got their confirmation above.
     }
   }
 
@@ -1948,7 +1974,6 @@ export function TableContent({ mode = "table" }) {
       || activeOrders.find((o) => o.status === "confirmed")
       || activeOrders.find((o) => o.status === "pending")
       || activeOrders[activeOrders.length - 1];
-    const allServed = activeOrders.every((o) => o.status === "served");
     const dominantCountdown = getCountdown(dominantOrder);
 
     return (
@@ -1996,8 +2021,16 @@ export function TableContent({ mode = "table" }) {
             <button onClick={() => { playTone(560, 70); setAddingMore(true); }} className="tap-btn" style={{ width: "100%", padding: 16, fontSize: 15, fontWeight: 600, borderRadius: 14, border: "2px solid #1a1a2e", background: "#fff", color: "#1a1a2e", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
               <span>➕</span> Add more items
             </button>
-            {allServed && (
-              <button onClick={() => { playTone(700, 90, "triangle"); requestBill(); }} className="tap-btn" style={{ width: "100%", padding: 16, fontSize: 16, fontWeight: 700, borderRadius: 14, border: "none", background: "#e8a33d", color: "#1a1a2e", cursor: "pointer" }}>
+            {/* Always available, whatever is still cooking — a table should
+                never be blocked from asking to pay just because dessert
+                hasn't come out yet. See requestBill() for why this is safe:
+                it never touches an order still in the kitchen's queue. */}
+            {billRequestSent ? (
+              <div style={{ width: "100%", padding: 16, borderRadius: 14, background: "#f0fdf4", border: "1px solid #bbf7d0", color: "#166534", fontWeight: 700, fontSize: 14.5, textAlign: "center" }}>
+                ✓ We've let the restaurant know — someone will be with you shortly
+              </div>
+            ) : (
+              <button onClick={requestBill} className="tap-btn" style={{ width: "100%", padding: 16, fontSize: 16, fontWeight: 700, borderRadius: 14, border: "none", background: "#e8a33d", color: "#1a1a2e", cursor: "pointer" }}>
                 🧾 Request Bill
               </button>
             )}

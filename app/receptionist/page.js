@@ -64,6 +64,7 @@ const DAY_OPTIONS = [
   { key: "wed", label: "Wed" }, { key: "thu", label: "Thu" }, { key: "fri", label: "Fri" }, { key: "sat", label: "Sat" },
 ];
 const WAITER_REASONS = [
+  { key: "bill", icon: "🧾", label: "Request Bill" },
   { key: "water", label: "Water", icon: "💧" },
   { key: "tissues", label: "Tissues", icon: "🧻" },
   { key: "cutlery", label: "Cutlery", icon: "🍴" },
