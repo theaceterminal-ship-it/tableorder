@@ -552,6 +552,21 @@ service cloud.firestore {
         allow read, write: if canWorkOutlet(outletId);
       }
 
+      // What a diner told us when they asked for the bill — a payment method
+      // (from the same fixed list reception's own Generate Bill modal offers)
+      // and an optional name and phone. Write-once by the diner, staff-only to
+      // read back: unlike deliveryDetails there is no tracking screen that
+      // ever needs to show this back to the customer who submitted it, so
+      // there is no reason to let them read it at all, not even their own.
+      //
+      // The point of collecting this here rather than only at Generate Bill
+      // time is exactly that: so reception is not the one typing it in.
+      match /billRequestDetails/{orderId} {
+        allow create: if request.resource.data.get('paymentMethod', '')
+                         in ['cash', 'card', 'upi', 'other'];
+        allow read, update, delete: if canWorkOutlet(outletId);
+      }
+
       // WHO is carrying a specific delivery, kept off the order document
       // itself for the same reason deliveryDetails is: orders are broadly
       // listable (see the note above /orders), and a rider's name and phone

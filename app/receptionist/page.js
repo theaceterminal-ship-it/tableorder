@@ -19,8 +19,9 @@ import {
   useOrders, useMenuItems, useCategories, useTables, useFloors,
   useOfferBanners, useBundleRules, useWaiterCalls, useCustomers,
   useStaff, useBillCustomers, useOutletInfo, useDeliveryDetails, useTableSessions, useRiders,
-  useRiderAssignments,
+  useRiderAssignments, useBillRequestDetails,
 } from "@/lib/use-outlet-data";
+import { PAYMENT_METHODS } from "@/lib/payment-methods";
 import { db } from "@/lib/firebase";
 import { uploadToCloudinary } from "@/lib/cloudinary";
 import JSZip from "jszip"; // npm install jszip
@@ -74,12 +75,7 @@ const WAITER_REASONS = [
 
 // NEW: payment methods offered when marking a bill paid — single source of
 // truth so the modal, CSV export, and PDF report all agree on labels.
-const PAYMENT_METHODS = [
-  { key: "cash", label: "Cash", icon: "💵" },
-  { key: "card", label: "Card", icon: "💳" },
-  { key: "upi", label: "UPI", icon: "📱" },
-  { key: "other", label: "Other", icon: "🔖" },
-];
+
 
 const ORDER_SECTIONS = [
   { key: "pending", label: "New", color: "#f59e0b", emptyMsg: "No new orders waiting.", emptyIcon: "🔔" },
@@ -416,6 +412,7 @@ function ReceptionPage() {
   const staffList = useStaff(restaurantId);
   const riders = useRiders(restaurantId);
   const riderAssignments = useRiderAssignments(restaurantId);
+  const billRequestDetails = useBillRequestDetails(restaurantId);
   const billCustomers = useBillCustomers(restaurantId);
   // Where each delivery order is going. Kept off the order document because
   // orders are publicly readable; see firestore.rules.
@@ -1155,12 +1152,22 @@ function ReceptionPage() {
   // method are chosen together, before the bill is written at all.
   function openGenerateBill(o) {
     // A delivery customer already gave their name, phone and payment method at
-    // checkout. Asking again wastes the receptionist's time and is a chance to
-    // key it in wrong — and a mistyped phone number is how a rider ends up
-    // unable to reach anyone. Pre-fill it; it stays editable.
-    const d = deliveryDetails[o.id];
+    // checkout, and a dine-in customer may have already given the same thing
+    // when they tapped "Request Bill" on their own screen. Either way, asking
+    // again wastes the receptionist's time and is a chance to key it in wrong
+    // — a mistyped phone number is how a rider ends up unable to reach anyone.
+    // Pre-fill it; it stays editable.
+    const delivery = deliveryDetails[o.id];
+    const billRequest = billRequestDetails[o.id];
+    const d = delivery || billRequest;
+    // Delivery only ever stores "cod" or "upi" (its own checkout vocabulary);
+    // a bill request already stores one of reception's own PAYMENT_METHODS
+    // keys directly, since the diner picked from that exact same list.
+    const paymentMethod = delivery
+      ? (delivery.paymentMethod === "upi" ? "upi" : "cash")
+      : (billRequest?.paymentMethod || "cash");
     setBillFlowForm(d
-      ? { name: d.name || "", phone: d.phone || "", paymentMethod: d.paymentMethod === "upi" ? "upi" : "cash", prefilled: true }
+      ? { name: d.name || "", phone: d.phone || "", paymentMethod, prefilled: true }
       : { name: "", phone: "", paymentMethod: "cash" });
     setBillFlowOrder(o);
   }

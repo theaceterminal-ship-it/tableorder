@@ -8,6 +8,7 @@ import { collection, addDoc, setDoc, updateDoc, doc, onSnapshot, query, where, o
 import { computeOfferPrice, computeBogoDiscount, receiptFor } from "@/lib/pricing";
 import { mergeItemLines, tableSessionWindowStart } from "@/lib/orders";
 import { recommendationsFor } from "@/lib/recommendations";
+import { PAYMENT_METHODS } from "@/lib/payment-methods";
 import { useRecModel } from "@/lib/use-outlet-data";
 import {
   ORDER_TYPES, DELIVERY_TABLE, validateDeliveryDetails, normalizePhone,
@@ -674,6 +675,11 @@ export function TableContent({ mode = "table" }) {
   // so a Request Bill failure needs its own place to actually be seen.
   const [billRequestError, setBillRequestError] = useState("");
   const [billRequestSent, setBillRequestSent] = useState(false);
+  // Asked once, right before the request that actually goes to reception —
+  // not name/phone specifically flagged as skippable, they are simply not
+  // required to submit.
+  const [billDetailsModalOpen, setBillDetailsModalOpen] = useState(false);
+  const [billDetailsForm, setBillDetailsForm] = useState({ name: "", phone: "", paymentMethod: "cash" });
   const [allOrdersRaw, setAllOrdersRaw] = useState([]);
   const [activeOrders, setActiveOrders] = useState([]);
   const [cart, setCart] = useState({});
@@ -1283,7 +1289,12 @@ export function TableContent({ mode = "table" }) {
   // already-served orders into a real bill_requested order so reception's
   // Bill Requested tab is populated immediately whenever that is possible.
   // The waiter call is the guarantee; the order transition is the bonus.
-  async function requestBill() {
+  // `billDetails` — { name, phone, paymentMethod } — comes from the modal
+  // shown when there is something to actually bill (see the button below).
+  // Written to its own staff-only document, not onto the order: exactly the
+  // same reasoning as deliveryDetails, and reception's Generate Bill modal
+  // already knows to look there for it.
+  async function requestBill(billDetails = null) {
     setBillRequestError("");
     setBillRequestSent(false);
 
@@ -1314,8 +1325,22 @@ export function TableContent({ mode = "table" }) {
     if (tableToken && tableSession !== undefined && !isSessionOpen(tableSession)) return;
 
     try {
+      // Generated up front, the same way a delivery order's id is, so the
+      // payment-preference document can be written under it BEFORE the order
+      // that references it exists — never the other way around.
+      const orderRef = doc(collection(db, "restaurants", restaurantId, "orders"));
+
+      if (billDetails) {
+        await setDoc(doc(db, "restaurants", restaurantId, "billRequestDetails", orderRef.id), {
+          name: billDetails.name.trim(),
+          phone: normalizePhone(billDetails.phone),
+          paymentMethod: billDetails.paymentMethod,
+          createdAt: Date.now(),
+        });
+      }
+
       const mergedItems = mergeItemLines(servedOrders.flatMap((o) => o.items));
-      await addDoc(collection(db, "restaurants", restaurantId, "orders"), {
+      await setDoc(orderRef, {
         table: tableNo, items: mergedItems, status: "bill_requested", etaMinutes: null, preparingAt: null, createdAt: Date.now(),
         ...(tableToken ? { tableToken } : {}),
       });
@@ -2030,7 +2055,22 @@ export function TableContent({ mode = "table" }) {
                 ✓ We've let the restaurant know — someone will be with you shortly
               </div>
             ) : (
-              <button onClick={requestBill} className="tap-btn" style={{ width: "100%", padding: 16, fontSize: 16, fontWeight: 700, borderRadius: 14, border: "none", background: "#e8a33d", color: "#1a1a2e", cursor: "pointer" }}>
+              <button
+                onClick={() => {
+                  // Something to actually bill — ask how they'll pay (and,
+                  // while we have them, their name and number) before it goes
+                  // to reception, rather than reception asking for it later.
+                  // Nothing to bill yet (everything still cooking) skips
+                  // straight to the guaranteed ping — there is nothing here
+                  // worth asking about.
+                  if (activeOrders.some((o) => o.status === "served")) {
+                    setBillDetailsForm({ name: "", phone: "", paymentMethod: "cash" });
+                    setBillDetailsModalOpen(true);
+                  } else {
+                    requestBill();
+                  }
+                }}
+                className="tap-btn" style={{ width: "100%", padding: 16, fontSize: 16, fontWeight: 700, borderRadius: 14, border: "none", background: "#e8a33d", color: "#1a1a2e", cursor: "pointer" }}>
                 🧾 Request Bill
               </button>
             )}
@@ -2041,6 +2081,46 @@ export function TableContent({ mode = "table" }) {
             )}
           </div>
         </div>
+
+        {billDetailsModalOpen && (
+          <div onClick={() => setBillDetailsModalOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 260, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+            <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: "24px 24px 0 0", width: "100%", maxWidth: 480, padding: 24, animation: "modalScaleIn 0.3s cubic-bezier(0.22,1,0.36,1)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                <h3 style={{ fontSize: 18, fontWeight: 800, margin: 0 }}>How will you be paying?</h3>
+                <button onClick={() => setBillDetailsModalOpen(false)} style={{ background: "none", border: "none", fontSize: 24, cursor: "pointer", color: "#888" }}>×</button>
+              </div>
+              <p style={{ fontSize: 13, color: "#888", marginTop: 2, marginBottom: 18 }}>This goes straight to the restaurant with your bill request.</p>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10, marginBottom: 18 }}>
+                {PAYMENT_METHODS.map((m) => (
+                  <button key={m.key} type="button"
+                    onClick={() => setBillDetailsForm((p) => ({ ...p, paymentMethod: m.key }))}
+                    className="tap-btn"
+                    style={{ display: "flex", alignItems: "center", gap: 8, padding: "14px 12px", borderRadius: 14, cursor: "pointer", textAlign: "left",
+                      border: billDetailsForm.paymentMethod === m.key ? "2px solid #e8a33d" : "1px solid #eee",
+                      background: billDetailsForm.paymentMethod === m.key ? "#fff5e0" : "#fff" }}>
+                    <span style={{ fontSize: 18 }}>{m.icon}</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1a1a2e" }}>{m.label}</span>
+                  </button>
+                ))}
+              </div>
+
+              <input value={billDetailsForm.name}
+                onChange={(e) => setBillDetailsForm((p) => ({ ...p, name: e.target.value }))}
+                placeholder="Your name" autoComplete="name"
+                style={{ width: "100%", padding: "13px 14px", fontSize: 15, borderRadius: 12, boxSizing: "border-box", border: "1.5px solid #e6e1d6", background: "#fff", fontFamily: "inherit", marginBottom: 10 }} />
+              <input value={billDetailsForm.phone}
+                onChange={(e) => setBillDetailsForm((p) => ({ ...p, phone: e.target.value }))}
+                placeholder="Phone number" type="tel" autoComplete="tel"
+                style={{ width: "100%", padding: "13px 14px", fontSize: 15, borderRadius: 12, boxSizing: "border-box", border: "1.5px solid #e6e1d6", background: "#fff", fontFamily: "inherit", marginBottom: 18 }} />
+
+              <button onClick={() => { setBillDetailsModalOpen(false); requestBill(billDetailsForm); }} className="tap-btn"
+                style={{ width: "100%", padding: 16, borderRadius: 14, border: "none", background: "#e8a33d", color: "#1a1a2e", fontSize: 16, fontWeight: 700, cursor: "pointer" }}>
+                🧾 Send Bill Request
+              </button>
+            </div>
+          </div>
+        )}
 
         <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "#fff", borderTop: "1px solid #eee", padding: "12px 20px", zIndex: 50 }}>
           <button onClick={() => { playTone(560, 70); setAddingMore(true); }} className="tap-btn" style={{ width: "100%", maxWidth: 480, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: 14, borderRadius: 50, border: "none", background: "#1a1a2e", color: "#fff", fontSize: 15, fontWeight: 600, cursor: "pointer", boxShadow: "0 4px 16px rgba(0,0,0,0.15)" }}>

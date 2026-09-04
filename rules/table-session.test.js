@@ -228,3 +228,50 @@ describe("requesting the bill on a protected, seated table", () => {
     ));
   });
 });
+
+describe("what a diner told us when requesting the bill", () => {
+  // Collected so reception is not the one typing this in — a payment method
+  // is required (from the same fixed list reception's own bill modal
+  // offers), name and phone are not.
+  const DOC_ID = "bill_req_1";
+  const details = (extra = {}) => ({ name: "Asha", phone: "9876543210", paymentMethod: "upi", createdAt: Date.now(), ...extra });
+
+  it("accepts a well-formed submission from an anonymous diner", async () => {
+    await assertSucceeds(setDoc(doc(anon(), "restaurants", OUTLET, "billRequestDetails", DOC_ID), details()));
+  });
+
+  it("accepts it with name and phone both left blank — only the payment method is required", async () => {
+    await assertSucceeds(setDoc(doc(anon(), "restaurants", OUTLET, "billRequestDetails", DOC_ID),
+      details({ name: "", phone: "" })));
+  });
+
+  it("refuses a payment method outside the fixed list reception itself offers", async () => {
+    await assertFails(setDoc(doc(anon(), "restaurants", OUTLET, "billRequestDetails", DOC_ID),
+      details({ paymentMethod: "bitcoin" })));
+  });
+
+  it("refuses a missing payment method entirely", async () => {
+    const { paymentMethod, ...rest } = details();
+    await assertFails(setDoc(doc(anon(), "restaurants", OUTLET, "billRequestDetails", DOC_ID), rest));
+  });
+
+  it("is not readable by the diner who just submitted it — unlike deliveryDetails, nothing here ever needs to be read back", async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), "restaurants", OUTLET, "billRequestDetails", DOC_ID), details());
+    });
+    await assertFails(getDoc(doc(anon(), "restaurants", OUTLET, "billRequestDetails", DOC_ID)));
+  });
+
+  it("is readable and editable by reception", async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), "restaurants", OUTLET, "billRequestDetails", DOC_ID), details());
+    });
+    await assertSucceeds(getDoc(doc(as(RECEPTION), "restaurants", OUTLET, "billRequestDetails", DOC_ID)));
+    await assertSucceeds(setDoc(doc(as(RECEPTION), "restaurants", OUTLET, "billRequestDetails", DOC_ID),
+      details({ paymentMethod: "cash" })));
+  });
+
+  it("refuses an outsider entirely", async () => {
+    await assertFails(getDoc(doc(as({ uid: "u_stranger", email: "x@y.test" }), "restaurants", OUTLET, "billRequestDetails", DOC_ID)));
+  });
+});
