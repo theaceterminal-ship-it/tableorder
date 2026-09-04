@@ -31,7 +31,7 @@ import {
   collection, onSnapshot, query, orderBy, where, doc, updateDoc, deleteDoc, setDoc, addDoc,
   getDoc, serverTimestamp, writeBatch,
 } from "firebase/firestore";
-import { computeBundleDiscounts, computeBillTotals } from "@/lib/pricing";
+import { computeBundleDiscounts, computeBillTotals, authoritativeItems } from "@/lib/pricing";
 import { can } from "@/lib/tenancy";
 import { fetchMasterMenu, seedOutletFromMaster } from "@/lib/brand";
 import {
@@ -1034,7 +1034,16 @@ function ReceptionPage() {
   async function generateBill(o, withQr = false, customerInfo = null) {
     const ordersToBill = ordersForBilling(o);
     const rawItems = mergeItemLines(ordersToBill.flatMap((ord) => ord.items));
-    const items = normalizedItems(rawItems);
+    const normalized = normalizedItems(rawItems);
+    // The order was written by whoever's phone pointed at a table's QR code —
+    // there is no login to check it against, so nothing stops a submitted
+    // price from being whatever a tampered client felt like sending. This is
+    // the one moment real money is actually charged, so it is the one moment
+    // every price gets checked against the menu rather than trusted as
+    // written — see authoritativeItems() in lib/pricing.js for what "checked"
+    // means (the item's real price, its chosen variation and add-ons, and any
+    // offer actually active today — never whatever number arrived on the order).
+    const items = authoritativeItems({ items: normalized, menuItems, offerBanners });
     // The fee recorded when the customer was quoted it, not one recomputed
     // now against settings that may since have changed.
     const deliveryFee = ordersToBill.reduce((sum, ord) => sum + (ord.deliveryFee || 0), 0);
