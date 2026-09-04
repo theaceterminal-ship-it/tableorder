@@ -664,6 +664,10 @@ export function TableContent({ mode = "table" }) {
   const [website, setWebsite] = useState(DEFAULT_WEBSITE);
   const [tableSession, setTableSession] = useState(undefined); // undefined = still loading
   const [orderError, setOrderError] = useState("");
+  // Shown on the Status screen specifically — orderError above only ever
+  // renders on the menu/cart screen, a different branch of this component,
+  // so a Request Bill failure needs its own place to actually be seen.
+  const [billRequestError, setBillRequestError] = useState("");
   const [allOrdersRaw, setAllOrdersRaw] = useState([]);
   const [activeOrders, setActiveOrders] = useState([]);
   const [cart, setCart] = useState({});
@@ -1259,20 +1263,43 @@ export function TableContent({ mode = "table" }) {
   }
 
   async function requestBill() {
+    setBillRequestError("");
     const servedOrders = activeOrders.filter((o) => o.status === "served");
     if (servedOrders.length === 0) return;
 
+    // A table given a code but no longer seated is refused by the security
+    // rule same as a fresh order would be — check first so the diner is told
+    // why, rather than tapping a button that quietly does nothing.
+    if (tableToken && tableSession !== undefined && !isSessionOpen(tableSession)) {
+      setBillRequestError(BLOCKED_MESSAGES[tableSession ? "session-expired" : "no-session"]);
+      return;
+    }
+
     const mergedItems = mergeItemLines(servedOrders.flatMap((o) => o.items));
 
-    await addDoc(collection(db, "restaurants", restaurantId, "orders"), {
-      table: tableNo, items: mergedItems, status: "bill_requested", etaMinutes: null, preparingAt: null, createdAt: Date.now(),
-    });
+    try {
+      await addDoc(collection(db, "restaurants", restaurantId, "orders"), {
+        table: tableNo, items: mergedItems, status: "bill_requested", etaMinutes: null, preparingAt: null, createdAt: Date.now(),
+        // This was the actual bug: every other write on this screen attaches
+        // the table's token when it has one, and this write never did — so
+        // on any table protected with a real QR code, the security rule
+        // silently refused it. "Request Bill" looked like it did nothing
+        // because, from Firestore's side, nothing was ever accepted.
+        ...(tableToken ? { tableToken } : {}),
+      });
 
-    const batch = writeBatch(db);
-    servedOrders.forEach((o) => batch.update(doc(db, "restaurants", restaurantId, "orders", o.id), { status: "merged" }));
-    await batch.commit();
+      const batch = writeBatch(db);
+      servedOrders.forEach((o) => batch.update(doc(db, "restaurants", restaurantId, "orders", o.id), { status: "merged" }));
+      await batch.commit();
 
-    playTone(700, 90, "triangle");
+      playTone(700, 90, "triangle");
+    } catch (e) {
+      // A silent failure here reads to the diner as a broken button. Whatever
+      // the cause, they see something rather than nothing.
+      setBillRequestError(e?.code === "permission-denied"
+        ? "We could not send that to the restaurant. Please call a staff member."
+        : "Something went wrong requesting your bill. Please try again.");
+    }
   }
 
   function getCountdown(o) {
@@ -1973,6 +2000,11 @@ export function TableContent({ mode = "table" }) {
               <button onClick={() => { playTone(700, 90, "triangle"); requestBill(); }} className="tap-btn" style={{ width: "100%", padding: 16, fontSize: 16, fontWeight: 700, borderRadius: 14, border: "none", background: "#e8a33d", color: "#1a1a2e", cursor: "pointer" }}>
                 🧾 Request Bill
               </button>
+            )}
+            {billRequestError && (
+              <div style={{ background: "#fef2f2", border: "1px solid #fecaca", color: "#b91c1c", padding: 14, borderRadius: 12, fontSize: 13.5 }}>
+                {billRequestError}
+              </div>
             )}
           </div>
         </div>

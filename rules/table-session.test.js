@@ -193,3 +193,38 @@ describe("sessions", () => {
     }, { merge: true }));
   });
 });
+
+describe("requesting the bill on a protected, seated table", () => {
+  // This is the actual bug: every other order write on the table screen
+  // attaches the table's token when it has one, and the bill-request write
+  // never did — so on any table actually protected with a real QR code, this
+  // create was silently refused. From the diner's side, tapping "Request
+  // Bill" did nothing at all.
+  const billRequest = (extra = {}) => ({
+    table: 1, status: "bill_requested",
+    items: [{ itemId: "dal", name: "Dal Makhani", qty: 1, price: 320 }],
+    etaMinutes: null, preparingAt: null, createdAt: Date.now(),
+    ...extra,
+  });
+
+  it("succeeds once the token is attached, exactly like placing an order does", async () => {
+    await assertSucceeds(addDoc(
+      collection(anon(), "restaurants", OUTLET, "orders"),
+      billRequest({ tableToken: T1_TOKEN })
+    ));
+  });
+
+  it("is refused with no token — this was the live bug", async () => {
+    await assertFails(addDoc(
+      collection(anon(), "restaurants", OUTLET, "orders"),
+      billRequest()
+    ));
+  });
+
+  it("is refused with the wrong table's token", async () => {
+    await assertFails(addDoc(
+      collection(anon(), "restaurants", OUTLET, "orders"),
+      billRequest({ tableToken: T2_TOKEN })
+    ));
+  });
+});
