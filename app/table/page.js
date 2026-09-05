@@ -2053,6 +2053,19 @@ export function TableContent({ mode = "table" }) {
             {dominantOrder.status === "preparing" && dominantCountdown && (
               <div style={{ fontSize: 48, marginTop: 14, fontFamily: "monospace", fontWeight: 700, letterSpacing: 2, color: "#e8a33d" }}>{dominantCountdown}</div>
             )}
+            {/* One clip while the kitchen has it, a different one once it's
+                left the kitchen but hasn't reached the table yet — the two
+                halves of a dine-in order's life before "served". */}
+            {dominantOrder.status === "preparing" && (
+              <div style={{ width: 150, height: 150, margin: "10px auto 0" }}>
+                <DotLottieReact src="/order-cooking.lottie" autoplay loop style={{ width: "100%", height: "100%" }} />
+              </div>
+            )}
+            {dominantOrder.status === "ready" && (
+              <div style={{ width: 170, height: 158, margin: "10px auto 0" }}>
+                <DotLottieReact src="/order-on-the-way.lottie" autoplay loop style={{ width: "100%", height: "100%" }} />
+              </div>
+            )}
           </div>
 
           {activeOrders.map((o) => {
