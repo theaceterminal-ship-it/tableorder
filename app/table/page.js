@@ -1007,8 +1007,14 @@ export function TableContent({ mode = "table" }) {
   // slow or failed connection still lets the customer in rather than
   // spinning forever; see the settingsLoaded check further down for what
   // happens if the cap fires before settings actually arrive.
+  //
+  // The floor is 2.6s (plus the 450ms fade-out below, so ~3s on screen) on
+  // purpose, not just enough to cover the data fetch: on a fast connection
+  // everything can be ready in a couple hundred ms, and without a real floor
+  // the brand's own logo would pop in and get swept away before anyone
+  // actually registered it. This is a first impression, not a loading gate.
   useEffect(() => {
-    const minTimer = setTimeout(() => setMinSplashElapsed(true), 1800);
+    const minTimer = setTimeout(() => setMinSplashElapsed(true), 2600);
     const capTimer = setTimeout(() => setSplashLeaving(true), 6000);
     return () => { clearTimeout(minTimer); clearTimeout(capTimer); };
   }, []);
@@ -1980,7 +1986,7 @@ export function TableContent({ mode = "table" }) {
             <DotLottieReact src="/delivery-intro.lottie" autoplay loop style={{ width: "100%", height: "100%" }} />
           </div>
           <div style={{ textAlign: "center", padding: 20, position: "relative", zIndex: 1, marginTop: -8 }}>
-            {profile?.logoUrl && (<img src={profile.logoUrl} alt="" style={{ width: 64, height: 64, borderRadius: "50%", objectFit: "cover", margin: "0 auto 16px", display: "block", border: "3px solid rgba(232,163,61,0.6)", animation: "splashGlow 2.2s ease-in-out infinite 0.7s" }} />)}
+            {profile?.logoUrl && (<img src={profile.logoUrl} alt="" style={{ width: 64, height: 64, borderRadius: "50%", objectFit: "cover", margin: "0 auto 16px", display: "block", border: "3px solid rgba(232,163,61,0.6)", opacity: 0, animation: "splashFade 0.6s ease 0.4s forwards, splashGlow 2.2s ease-in-out infinite 0.7s" }} />)}
             <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 400, fontSize: 36, color: "#fff", letterSpacing: 0.5, textTransform: "uppercase", animation: "splashLetters 1s ease 0.85s both" }}>{profile?.name || "Welcome"}</div>
             <div style={{ width: 46, height: 2, background: "#e8a33d", margin: "16px auto", animation: "splashLine 0.9s ease 1.05s both" }} />
             <div style={{ fontSize: 12.5, color: "rgba(255,255,255,0.55)", letterSpacing: 1.5, textTransform: "uppercase", animation: "splashFade 1s ease 1.2s both" }}>{profile?.tagline || "Order online, delivered fresh"}</div>
@@ -1995,7 +2001,7 @@ export function TableContent({ mode = "table" }) {
           <DotLottieReact src="/dinein-intro.lottie" autoplay loop style={{ width: "100%", height: "100%" }} />
         </div>
         <div style={{ textAlign: "center", padding: 20, position: "relative", zIndex: 1, marginTop: -8 }}>
-          {profile?.logoUrl && (<img src={profile.logoUrl} alt="" style={{ width: 64, height: 64, borderRadius: "50%", objectFit: "cover", margin: "0 auto 16px", display: "block", border: "3px solid rgba(232,163,61,0.6)", animation: "splashGlow 2.2s ease-in-out infinite 0.7s" }} />)}
+          {profile?.logoUrl && (<img src={profile.logoUrl} alt="" style={{ width: 64, height: 64, borderRadius: "50%", objectFit: "cover", margin: "0 auto 16px", display: "block", border: "3px solid rgba(232,163,61,0.6)", opacity: 0, animation: "splashFade 0.6s ease 0.4s forwards, splashGlow 2.2s ease-in-out infinite 0.7s" }} />)}
           <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 400, fontSize: 36, color: "#fff", letterSpacing: 0.5, textTransform: "uppercase", animation: "splashLetters 1s ease 0.85s both" }}>{profile?.name || "Welcome"}</div>
           <div style={{ width: 46, height: 2, background: "#e8a33d", margin: "16px auto", animation: "splashLine 0.9s ease 1.05s both" }} />
           <div style={{ fontSize: 12.5, color: "rgba(255,255,255,0.55)", letterSpacing: 1.5, textTransform: "uppercase", animation: "splashFade 1s ease 1.2s both" }}>{profile?.tagline || "Scan, order, enjoy"}</div>
