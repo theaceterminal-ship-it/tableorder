@@ -704,6 +704,17 @@ export function TableContent({ mode = "table" }) {
   const [cartBump, setCartBump] = useState(false);
   const [showSplash, setShowSplash] = useState(true);
   const [splashLeaving, setSplashLeaving] = useState(false);
+  // Whether the info/settings doc has come back from Firestore at all yet —
+  // not whether ordering happens to be enabled. website starts out as
+  // DEFAULT_WEBSITE (enabled: false), so without this flag the "closed"
+  // screen below would render on that default for the instant before the
+  // real doc arrives, on every single restaurant, closed or not.
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [menuLoaded, setMenuLoaded] = useState(false);
+  // A floor under the splash's on-screen time, purely so it doesn't just
+  // flash for one frame when Firestore answers instantly from cache — the
+  // ceiling that keeps it honest is minSplashElapsed's cap below.
+  const [minSplashElapsed, setMinSplashElapsed] = useState(false);
   const [detailItem, setDetailItem] = useState(null);
   // NEW: when set, the ItemDetailModal is editing THIS cart line instead of
   // adding a brand-new one. Set by openLineCustomize(), cleared on close.
@@ -752,6 +763,9 @@ export function TableContent({ mode = "table" }) {
           requirePhoneVerification: !!data.requirePhoneVerification,
         });
       }
+      // Fires whether or not the doc exists — either way, we now know the
+      // real answer instead of the DEFAULT_WEBSITE guess.
+      setSettingsLoaded(true);
     });
     return () => unsub();
   }, [restaurantId]);
@@ -768,6 +782,7 @@ export function TableContent({ mode = "table" }) {
     const q = query(collection(db, "restaurants", restaurantId, "menuItems"), orderBy("createdAt", "asc"));
     const unsub = onSnapshot(q, (snap) => {
       setMenuItems(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      setMenuLoaded(true);
     });
     return () => unsub();
   }, [restaurantId]);
@@ -953,15 +968,41 @@ export function TableContent({ mode = "table" }) {
     prevCartCountRef.current = c;
   }, [cart]);
 
+  // The splash used to leave on a flat timer, with no idea whether the data
+  // it's about to render on top of had actually arrived yet. For a delivery
+  // link that meant the "closed" screen below could flash on for real,
+  // currently-open restaurants: website starts out as DEFAULT_WEBSITE
+  // (enabled: false) until Firestore answers, and the splash used to be gone
+  // well before that answer typically came back.
+  //
+  // So the splash now leaves only once BOTH are true: a minimum on-screen
+  // time has passed (so it doesn't just flash for one frame when everything
+  // is cache-warm), and the data that decides what comes next has actually
+  // loaded — website settings always, plus the menu itself for the delivery
+  // link, since that's the screen right behind it. A hard cap makes sure a
+  // slow or failed connection still lets the customer in rather than
+  // spinning forever; see the settingsLoaded check further down for what
+  // happens if the cap fires before settings actually arrive.
   useEffect(() => {
-    const leaveTimer = setTimeout(() => setSplashLeaving(true), 2200);
-    const hideTimer = setTimeout(() => setShowSplash(false), 2650);
-    return () => { clearTimeout(leaveTimer); clearTimeout(hideTimer); };
+    const minTimer = setTimeout(() => setMinSplashElapsed(true), 1800);
+    const capTimer = setTimeout(() => setSplashLeaving(true), 6000);
+    return () => { clearTimeout(minTimer); clearTimeout(capTimer); };
   }, []);
+
+  useEffect(() => {
+    if (splashLeaving) return;
+    const dataReady = settingsLoaded && (!isDeliveryMode || menuLoaded);
+    if (minSplashElapsed && dataReady) setSplashLeaving(true);
+  }, [minSplashElapsed, settingsLoaded, menuLoaded, isDeliveryMode, splashLeaving]);
+
+  useEffect(() => {
+    if (!splashLeaving) return;
+    const t = setTimeout(() => setShowSplash(false), 450);
+    return () => clearTimeout(t);
+  }, [splashLeaving]);
 
   function dismissSplash() {
     setSplashLeaving(true);
-    setTimeout(() => setShowSplash(false), 350);
   }
 
   function handleOfferScroll(e) {
@@ -1864,22 +1905,15 @@ export function TableContent({ mode = "table" }) {
     );
   }
 
-  // ---------- Closed, or not taking online orders ----------
-  if (isDeliveryMode && !website.enabled) {
-    return (
-      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, background: "#faf8f5" }}>
-        <div style={{ textAlign: "center", maxWidth: 380 }}>
-          <div style={{ fontSize: 48, marginBottom: 16 }}>🌙</div>
-          <h2 style={{ fontSize: 20, fontWeight: 700, color: "#1a1a2e" }}>{profile?.name || "This restaurant"}</h2>
-          <p style={{ color: "#6b6b7b", marginTop: 8, lineHeight: 1.6 }}>
-            Online ordering isn&apos;t available here yet. You&apos;re very welcome to visit us in person.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
   // ---------- Splash ----------
+  //
+  // Checked BEFORE the "closed" screen below on purpose. website starts out
+  // as DEFAULT_WEBSITE (enabled: false) until the real settings doc answers,
+  // so if the closed check ran first, every delivery link would flash "not
+  // available" for an instant on load — closed restaurants and open ones
+  // alike. The splash's own effects hold it open until settingsLoaded (and,
+  // for delivery, menuLoaded) actually flips, so by the time it leaves, the
+  // closed check below has a real answer to look at instead of the default.
   if (showSplash) {
     // The delivery entry point (app/order) is the first thing a customer sees
     // after tapping a Google-profile link, with no table or QR code to anchor
@@ -1916,6 +1950,26 @@ export function TableContent({ mode = "table" }) {
           <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 400, fontSize: 36, color: "#fff", letterSpacing: 0.5, textTransform: "uppercase", animation: `splashLetters 1s ease ${layers.length * 0.18 + 0.15}s both` }}>{profile?.name || "Welcome"}</div>
           <div style={{ width: 46, height: 2, background: "#e8a33d", margin: "16px auto", animation: `splashLine 0.9s ease ${layers.length * 0.18 + 0.35}s both` }} />
           <div style={{ fontSize: 12.5, color: "rgba(255,255,255,0.55)", letterSpacing: 1.5, textTransform: "uppercase", animation: `splashFade 1s ease ${layers.length * 0.18 + 0.5}s both` }}>{profile?.tagline || "Scan, order, enjoy"}</div>
+        </div>
+      </div>
+    );
+  }
+
+  // ---------- Closed, or not taking online orders ----------
+  //
+  // Gated on settingsLoaded too, not just on the splash being done — the
+  // splash can also be skipped early by a tap (dismissSplash), and this way
+  // an early tap falls through to the menu rather than to a false "closed"
+  // on the DEFAULT_WEBSITE guess.
+  if (isDeliveryMode && settingsLoaded && !website.enabled) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, background: "#faf8f5" }}>
+        <div style={{ textAlign: "center", maxWidth: 380 }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>🌙</div>
+          <h2 style={{ fontSize: 20, fontWeight: 700, color: "#1a1a2e" }}>{profile?.name || "This restaurant"}</h2>
+          <p style={{ color: "#6b6b7b", marginTop: 8, lineHeight: 1.6 }}>
+            Online ordering isn&apos;t available here yet. You&apos;re very welcome to visit us in person.
+          </p>
         </div>
       </div>
     );
