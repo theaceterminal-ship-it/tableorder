@@ -720,6 +720,17 @@ export function TableContent({ mode = "table" }) {
   // adding a brand-new one. Set by openLineCustomize(), cleared on close.
   const [editingLineId, setEditingLineId] = useState(null);
   const [ratingOrder, setRatingOrder] = useState(null);
+  // The dine-in rating flow above triggers off a status transition to "paid",
+  // watched through allOrdersRaw — which is only ever populated for a table
+  // (it's queried by tableNo, and a delivery customer has none). So delivery
+  // gets its own trigger below, modelled on the same one-shot pattern: a
+  // captured copy of the order, set once, that render doesn't keep re-deriving
+  // from the live document. Gating render on the live order's `.rating` field
+  // directly would close the popup the instant the rating write round-trips
+  // back through the listener — before the "thank you" / Google-review half
+  // of it ever showed.
+  const [deliveryRatingOrder, setDeliveryRatingOrder] = useState(null);
+  const deliveryRatingShownForRef = useRef(null);
   const [vegOnly, setVegOnly] = useState(false);
   const [googleReviewLink, setGoogleReviewLink] = useState("");
   const [googleReviewEnabled, setGoogleReviewEnabled] = useState(false);
@@ -844,6 +855,19 @@ export function TableContent({ mode = "table" }) {
     );
     return () => unsub();
   }, [restaurantId, placedOrderId]);
+
+  // Fires once per order, the first time it's seen delivered — not on every
+  // snapshot afterwards, which is what the ref is for. Submitting a rating
+  // writes straight back onto this same order and re-fires this listener;
+  // without the ref, that write would count as "a new order to prompt for".
+  useEffect(() => {
+    if (!trackedOrder) return;
+    if (deliveryStage(trackedOrder) !== DELIVERY_STAGES.DELIVERED) return;
+    if (trackedOrder.rating) return;
+    if (deliveryRatingShownForRef.current === trackedOrder.id) return;
+    deliveryRatingShownForRef.current = trackedOrder.id;
+    setDeliveryRatingOrder(trackedOrder);
+  }, [trackedOrder]);
 
   useEffect(() => {
     if (!restaurantId || !placedOrderId) { setRider(null); return; }
@@ -1737,23 +1761,51 @@ export function TableContent({ mode = "table" }) {
     const steps = deliveryTimeline(placed || { orderType: "delivery", status: "pending" });
     const stage = deliveryStage(placed || { orderType: "delivery" });
     const arrived = stage === DELIVERY_STAGES.DELIVERED;
+    const dispatched = stage === DELIVERY_STAGES.DISPATCHED;
+    // "Accepted" isn't its own DELIVERY_STAGES value — it's still DELIVERY_STAGES.KITCHEN
+    // underneath — but the restaurant confirming the order is a real, distinct
+    // moment for the customer, worth its own line and clip rather than being
+    // lumped in with "we haven't looked at this yet".
+    const accepted = !arrived && !dispatched && (placed?.status || "pending") !== "pending";
     // Estimated from the current menu until the order is billed at dispatch,
     // then the real figures the customer was actually charged, straight off
     // the order document.
     const receipt = placed ? receiptFor(placed, { menuItems, bundleRules }) : null;
     return (
       <div style={{ minHeight: "100vh", background: "#faf8f5", padding: "40px 20px", fontFamily: "system-ui, sans-serif" }}>
+        {/* The dine-in rating popup fires off a "paid" transition it can only see
+            for a table's own orders. Delivery has no table, so it gets its own
+            trigger — see the deliveryRatingOrder effect above. */}
+        {deliveryRatingOrder && (
+          <RatingPopup order={deliveryRatingOrder} restaurantId={restaurantId} onDone={() => setDeliveryRatingOrder(null)} googleReviewLink={googleReviewEnabled ? googleReviewLink : ""} />
+        )}
         <div style={{ maxWidth: 460, margin: "0 auto", textAlign: "center" }}>
-          <div style={{ fontSize: 52, marginBottom: 14 }}>{arrived ? "🎉" : "🛵"}</div>
+          {arrived ? (
+            <div style={{ width: 170, height: 170, margin: "0 auto 8px" }}>
+              <DotLottieReact src="/order-delivered.lottie" autoplay loop style={{ width: "100%", height: "100%" }} />
+            </div>
+          ) : dispatched ? (
+            <div style={{ width: 170, height: 170, margin: "0 auto 8px" }}>
+              <DotLottieReact src="/order-rider.lottie" autoplay loop style={{ width: "100%", height: "100%" }} />
+            </div>
+          ) : accepted ? (
+            <div style={{ width: 170, height: 170, margin: "0 auto 8px" }}>
+              <DotLottieReact src="/order-accepted.lottie" autoplay loop style={{ width: "100%", height: "100%" }} />
+            </div>
+          ) : (
+            <div style={{ fontSize: 52, marginBottom: 14 }}>🛵</div>
+          )}
           <h1 style={{ fontSize: 24, fontWeight: 800, color: "#1a1a2e", margin: "0 0 8px" }}>
-            {arrived ? "Delivered — enjoy!" : stage === DELIVERY_STAGES.DISPATCHED ? "On its way" : "Order placed"}
+            {arrived ? "Delivered — enjoy!" : dispatched ? "On its way" : accepted ? "Order accepted" : "Order placed"}
           </h1>
           <p style={{ color: "#6b6b7b", fontSize: 14.5, lineHeight: 1.6, margin: "0 0 22px" }}>
             {arrived
               ? `Thanks for ordering from ${profile?.name || "us"}.`
-              : stage === DELIVERY_STAGES.DISPATCHED
+              : dispatched
                 ? "Your food has left the restaurant."
-                : `${profile?.name || "The restaurant"} has your order and will confirm it shortly.${website.deliveryEtaMinutes ? ` Delivery usually takes about ${website.deliveryEtaMinutes} minutes.` : ""}`}
+                : accepted
+                  ? `${profile?.name || "The restaurant"} is preparing your order.${website.deliveryEtaMinutes ? ` Delivery usually takes about ${website.deliveryEtaMinutes} minutes.` : ""}`
+                  : `${profile?.name || "The restaurant"} has your order and will confirm it shortly.${website.deliveryEtaMinutes ? ` Delivery usually takes about ${website.deliveryEtaMinutes} minutes.` : ""}`}
           </p>
 
           {/* Being able to call the person carrying your dinner is most of the
@@ -1936,20 +1988,17 @@ export function TableContent({ mode = "table" }) {
         </div>
       );
     }
-    const layers = ["🍞", "🥬", "🍅", "🧀", "🥩", "🍞"];
     return (
       <div onClick={dismissSplash} style={{ position: "fixed", inset: 0, zIndex: 999, cursor: "pointer", background: "linear-gradient(135deg, #1a1a2e 0%, #241f3d 55%, #2d1b1b 100%)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", opacity: splashLeaving ? 0 : 1, transition: "opacity 0.45s ease", overflow: "hidden" }}>
-        <div style={{ fontSize: 11, letterSpacing: 3, color: "rgba(255,255,255,0.5)", textTransform: "uppercase", marginBottom: 18, fontWeight: 700, animation: "splashFade 0.6s ease" }}>Preparing the kitchen...</div>
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
-          {layers.map((l, i) => (
-            <span key={i} style={{ fontSize: 38, lineHeight: 1, marginTop: i === 0 ? 0 : -10, animation: `layerDrop 0.5s ease ${i * 0.18}s both`, filter: "drop-shadow(0 3px 4px rgba(0,0,0,0.35))" }}>{l}</span>
-          ))}
+        <div style={{ fontSize: 11, letterSpacing: 3, color: "rgba(255,255,255,0.5)", textTransform: "uppercase", marginBottom: 4, fontWeight: 700, animation: "splashFade 0.6s ease" }}>Preparing the kitchen...</div>
+        <div style={{ width: 150, height: 150, animation: "splashFade 0.5s ease" }}>
+          <DotLottieReact src="/dinein-intro.lottie" autoplay loop style={{ width: "100%", height: "100%" }} />
         </div>
-        <div style={{ textAlign: "center", padding: 20, position: "relative", zIndex: 1, marginTop: 6 }}>
-          {profile?.logoUrl && (<img src={profile.logoUrl} alt="" style={{ width: 64, height: 64, borderRadius: "50%", objectFit: "cover", margin: "0 auto 16px", display: "block", border: "3px solid rgba(232,163,61,0.6)", animation: `splashGlow 2.2s ease-in-out infinite ${layers.length * 0.18}s` }} />)}
-          <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 400, fontSize: 36, color: "#fff", letterSpacing: 0.5, textTransform: "uppercase", animation: `splashLetters 1s ease ${layers.length * 0.18 + 0.15}s both` }}>{profile?.name || "Welcome"}</div>
-          <div style={{ width: 46, height: 2, background: "#e8a33d", margin: "16px auto", animation: `splashLine 0.9s ease ${layers.length * 0.18 + 0.35}s both` }} />
-          <div style={{ fontSize: 12.5, color: "rgba(255,255,255,0.55)", letterSpacing: 1.5, textTransform: "uppercase", animation: `splashFade 1s ease ${layers.length * 0.18 + 0.5}s both` }}>{profile?.tagline || "Scan, order, enjoy"}</div>
+        <div style={{ textAlign: "center", padding: 20, position: "relative", zIndex: 1, marginTop: -8 }}>
+          {profile?.logoUrl && (<img src={profile.logoUrl} alt="" style={{ width: 64, height: 64, borderRadius: "50%", objectFit: "cover", margin: "0 auto 16px", display: "block", border: "3px solid rgba(232,163,61,0.6)", animation: "splashGlow 2.2s ease-in-out infinite 0.7s" }} />)}
+          <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 400, fontSize: 36, color: "#fff", letterSpacing: 0.5, textTransform: "uppercase", animation: "splashLetters 1s ease 0.85s both" }}>{profile?.name || "Welcome"}</div>
+          <div style={{ width: 46, height: 2, background: "#e8a33d", margin: "16px auto", animation: "splashLine 0.9s ease 1.05s both" }} />
+          <div style={{ fontSize: 12.5, color: "rgba(255,255,255,0.55)", letterSpacing: 1.5, textTransform: "uppercase", animation: "splashFade 1s ease 1.2s both" }}>{profile?.tagline || "Scan, order, enjoy"}</div>
         </div>
       </div>
     );
@@ -1965,7 +2014,9 @@ export function TableContent({ mode = "table" }) {
     return (
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, background: "#faf8f5" }}>
         <div style={{ textAlign: "center", maxWidth: 380 }}>
-          <div style={{ fontSize: 48, marginBottom: 16 }}>🌙</div>
+          <div style={{ width: 130, height: 98, margin: "0 auto 10px" }}>
+            <DotLottieReact src="/ordering-closed.lottie" autoplay loop style={{ width: "100%", height: "100%" }} />
+          </div>
           <h2 style={{ fontSize: 20, fontWeight: 700, color: "#1a1a2e" }}>{profile?.name || "This restaurant"}</h2>
           <p style={{ color: "#6b6b7b", marginTop: 8, lineHeight: 1.6 }}>
             Online ordering isn&apos;t available here yet. You&apos;re very welcome to visit us in person.
