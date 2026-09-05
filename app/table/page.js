@@ -15,6 +15,7 @@ import {
   deliveryTimeline, deliveryStage, isDeliveryComplete, DELIVERY_STAGES,
   deliveryOrderErrorMessage,
 } from "@/lib/order-types";
+import { DotLottieReact } from "@lottiefiles/dotlottie-react";
 import PhoneVerification from "@/components/PhoneVerification";
 import { isOtpEnabled } from "@/lib/phone-auth";
 import { toE164 } from "@/lib/phone";
@@ -1880,6 +1881,27 @@ export function TableContent({ mode = "table" }) {
 
   // ---------- Splash ----------
   if (showSplash) {
+    // The delivery entry point (app/order) is the first thing a customer sees
+    // after tapping a Google-profile link, with no table or QR code to anchor
+    // them — so its splash leads with motion (a delivery-courier Lottie clip)
+    // instead of the dine-in emoji stack, then resolves into the same
+    // logo/name/tagline block every splash ends on.
+    if (isDeliveryMode) {
+      return (
+        <div onClick={dismissSplash} style={{ position: "fixed", inset: 0, zIndex: 999, cursor: "pointer", background: "linear-gradient(135deg, #1a1a2e 0%, #241f3d 55%, #2d1b1b 100%)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", opacity: splashLeaving ? 0 : 1, transition: "opacity 0.45s ease", overflow: "hidden" }}>
+          <div style={{ fontSize: 11, letterSpacing: 3, color: "rgba(255,255,255,0.5)", textTransform: "uppercase", marginBottom: 4, fontWeight: 700, animation: "splashFade 0.6s ease" }}>Straight from our kitchen to you</div>
+          <div style={{ width: 200, height: 160, animation: "splashFade 0.5s ease" }}>
+            <DotLottieReact src="/delivery-intro.lottie" autoplay loop style={{ width: "100%", height: "100%" }} />
+          </div>
+          <div style={{ textAlign: "center", padding: 20, position: "relative", zIndex: 1, marginTop: -8 }}>
+            {profile?.logoUrl && (<img src={profile.logoUrl} alt="" style={{ width: 64, height: 64, borderRadius: "50%", objectFit: "cover", margin: "0 auto 16px", display: "block", border: "3px solid rgba(232,163,61,0.6)", animation: "splashGlow 2.2s ease-in-out infinite 0.7s" }} />)}
+            <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 400, fontSize: 36, color: "#fff", letterSpacing: 0.5, textTransform: "uppercase", animation: "splashLetters 1s ease 0.85s both" }}>{profile?.name || "Welcome"}</div>
+            <div style={{ width: 46, height: 2, background: "#e8a33d", margin: "16px auto", animation: "splashLine 0.9s ease 1.05s both" }} />
+            <div style={{ fontSize: 12.5, color: "rgba(255,255,255,0.55)", letterSpacing: 1.5, textTransform: "uppercase", animation: "splashFade 1s ease 1.2s both" }}>{profile?.tagline || "Order online, delivered fresh"}</div>
+          </div>
+        </div>
+      );
+    }
     const layers = ["🍞", "🥬", "🍅", "🧀", "🥩", "🍞"];
     return (
       <div onClick={dismissSplash} style={{ position: "fixed", inset: 0, zIndex: 999, cursor: "pointer", background: "linear-gradient(135deg, #1a1a2e 0%, #241f3d 55%, #2d1b1b 100%)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", opacity: splashLeaving ? 0 : 1, transition: "opacity 0.45s ease", overflow: "hidden" }}>
