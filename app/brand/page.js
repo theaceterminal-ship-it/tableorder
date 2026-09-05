@@ -18,8 +18,11 @@ import {
   listBrandMembers, listOutletStaff, removeBrandMember, removeOutletStaff,
   importMasterItems, updateMyProfile, updateBrandIdentity,
 } from "@/lib/brand";
-import { parseMenuText, MENU_CSV_TEMPLATE } from "@/lib/menu-import";
+import {
+  parseMenuText, MENU_CSV_TEMPLATE, extractZipEntries, matchImageFile, uploadWithConcurrency,
+} from "@/lib/menu-import";
 import { uploadToCloudinary } from "@/lib/firebase";
+import JSZip from "jszip";
 import {
   can, canAccessOutlet, canInvite, ROLE_LABELS, TIER_LABELS, ROLES,
   tierLimits, canAddOutlet,
@@ -64,6 +67,13 @@ function BrandConsoleInner() {
   const [importText, setImportText] = useState("");
   const [importFormat, setImportFormat] = useState("csv");
   const [importPreview, setImportPreview] = useState(null);
+  // ZIP (CSV + photos) — the outlet POS importer already had this; the master
+  // menu didn't, which meant a brand-wide catalog with photos had no way in
+  // except CSV/JSON rows carrying already-hosted image links.
+  const [zipFile, setZipFile] = useState(null);
+  const [zipImages, setZipImages] = useState({});
+  const [zipParsing, setZipParsing] = useState(false);
+  const [zipUploadProgress, setZipUploadProgress] = useState(null);
   const [myProfile, setMyProfile] = useState({ name: "", phone: "" });
   const [identity, setIdentity] = useState({ name: "", logoUrl: "", accentColor: "#e8a33d" });
   const [savedNote, setSavedNote] = useState("");
@@ -137,6 +147,74 @@ function BrandConsoleInner() {
     } finally {
       setBusy(false);
     }
+  }
+
+  // === ZIP (CSV + photos) master-menu import ===
+  // Mirrors the outlet POS importer's zip flow — see app/receptionist/page.js
+  // and lib/menu-import.js's extractZipEntries/uploadWithConcurrency, shared
+  // by both rather than duplicated a second time.
+  async function handleZipFileSelected(file) {
+    if (!file) return;
+    setZipFile(file);
+    setZipParsing(true);
+    setImportPreview(null);
+    try {
+      const { csvText, imagesMap } = await extractZipEntries(file);
+      setZipImages(imagesMap);
+      const result = parseMenuText(csvText, "csv");
+      if (result.error) { setImportPreview(result); return; }
+      const itemsWithImageStatus = result.items.map((item) => {
+        const zipEntry = item.imageFile ? matchImageFile(item.imageFile, imagesMap) : null;
+        return { ...item, imageMatchStatus: zipEntry ? "matched" : item.imageFile ? "missing" : "none", _zipEntry: zipEntry };
+      });
+      setImportPreview({ ...result, items: itemsWithImageStatus, isZip: true });
+    } catch (err) {
+      setImportPreview({ items: [], skipped: [], error: err.message });
+    } finally {
+      setZipParsing(false);
+    }
+  }
+
+  async function downloadZipTemplate() {
+    const zip = new JSZip();
+    zip.file("menu.csv",
+`Name,Price,Category,Description,FoodType,ChefSpecial,Featured,ImageFile,Variations,Addons,ETA,BOGO
+Paneer Tikka,320,Starters,Cottage cheese marinated in spices,veg,no,no,paneer-tikka.jpg,,,15,no
+Margherita Pizza,320,Mains,Classic tomato and mozzarella,veg,no,yes,pizza.jpg,"Small:220|Medium:320|Large:420","Extra Cheese:40|Extra Olives:30",20,no
+Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,,,,10,yes
+`);
+    zip.file("images/README.txt", "Put your photos in this folder.\nName each file to exactly match the ImageFile column in menu.csv (e.g. paneer-tikka.jpg).\nSupported formats: jpg, jpeg, png, webp, gif.\nThese photos are uploaded to Cloudinary automatically during import — you don't need to upload them anywhere yourself.");
+    const blob = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "master-menu-import-template.zip";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // Uploads every matched photo to Cloudinary first, then writes the master
+  // menu items with real hosted URLs — same order of operations as the
+  // outlet importer, so a failed upload never leaves a half-written item.
+  async function importZipItems() {
+    const toUpload = importPreview.items.filter((it) => it.imageMatchStatus === "matched" && it._zipEntry);
+    setZipUploadProgress({ done: 0, total: toUpload.length });
+    const results = await uploadWithConcurrency(
+      toUpload.map((it) => async () => {
+        const blob = await it._zipEntry.async("blob");
+        const file = new File([blob], it.imageFile || it.name, { type: blob.type || "image/jpeg" });
+        try { return await uploadToCloudinary(file); }
+        catch { return await uploadToCloudinary(file); } // one retry
+      }),
+      5,
+      (done, total) => setZipUploadProgress({ done, total }),
+    );
+    toUpload.forEach((it, i) => { if (typeof results[i] === "string") it.imageUrl = results[i]; });
+
+    const cleanItems = importPreview.items.map(({ imageFile, imageMatchStatus, _zipEntry, ...rest }) => rest);
+    const res = await importMasterItems(brandId, cleanItems, master);
+    setZipUploadProgress(null);
+    return res;
   }
 
   if (!brandId || !brand) {
@@ -397,54 +475,78 @@ function BrandConsoleInner() {
             <div style={card}>
               <h3 style={{ fontSize: 14.5, fontWeight: 800, margin: "0 0 4px" }}>Bulk import</h3>
               <p style={{ fontSize: 12.5, color: "#888", margin: "0 0 14px", lineHeight: 1.6 }}>
-                Paste a CSV or JSON menu, or upload a file. Rows without a name or a usable price
-                are skipped rather than imported broken, and names already on the master menu are
-                left alone so you can re-import a corrected file safely.
+                Paste a CSV or JSON menu, upload a file, or a ZIP with photos included. Rows without a
+                name or a usable price are skipped rather than imported broken, and names already on
+                the master menu are left alone so you can re-import a corrected file safely. A dish
+                with sizes or add-ons stays <strong>one row</strong> — see the Variations/Addons columns
+                in the template, e.g. <code>Small:220|Medium:320|Large:420</code> — rather than one row
+                per size, which would import as separate, unrelated items.
               </p>
 
               <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-                {["csv", "json"].map((f) => (
-                  <button key={f} onClick={() => { setImportFormat(f); setImportPreview(null); }}
+                {["csv", "json", "zip"].map((f) => (
+                  <button key={f} onClick={() => { setImportFormat(f); setImportPreview(null); setImportText(""); }}
                     style={{ ...btn, padding: "7px 14px", fontSize: 12.5, background: importFormat === f ? "#1a1a2e" : "#fff", color: importFormat === f ? "#fff" : "#1a1a2e", border: importFormat === f ? "1px solid #1a1a2e" : "1px solid #e6e1d6" }}>
-                    {f.toUpperCase()}
+                    {f === "zip" ? "ZIP (CSV + Photos)" : f.toUpperCase()}
                   </button>
                 ))}
-                <input type="file" accept=".csv,.json,.txt" style={{ fontSize: 12.5 }}
-                  onChange={async (e) => {
-                    const f = e.target.files?.[0];
-                    if (!f) return;
-                    const text = await f.text();
-                    setImportText(text);
-                    setImportFormat(f.name.toLowerCase().endsWith(".json") ? "json" : "csv");
-                    setImportPreview(null);
-                  }} />
-                <button style={{ ...btn, padding: "7px 14px", fontSize: 12.5 }}
-                  onClick={() => {
+                {importFormat !== "zip" && (
+                  <input type="file" accept=".csv,.json,.txt" style={{ fontSize: 12.5 }}
+                    onChange={async (e) => {
+                      const f = e.target.files?.[0];
+                      if (!f) return;
+                      const text = await f.text();
+                      setImportText(text);
+                      setImportFormat(f.name.toLowerCase().endsWith(".json") ? "json" : "csv");
+                      setImportPreview(null);
+                    }} />
+                )}
+                <button style={{ ...btn, padding: "7px 14px", fontSize: 12.5, marginLeft: importFormat === "zip" ? "auto" : 0 }}
+                  onClick={importFormat === "zip" ? downloadZipTemplate : () => {
                     const blob = new Blob([MENU_CSV_TEMPLATE], { type: "text/csv" });
                     const a = document.createElement("a");
                     a.href = URL.createObjectURL(blob);
                     a.download = "master-menu-template.csv";
                     a.click();
                   }}>
-                  Download template
+                  ↓ Download {importFormat === "zip" ? "ZIP" : ""} template
                 </button>
               </div>
 
-              <textarea value={importText} onChange={(e) => { setImportText(e.target.value); setImportPreview(null); }}
-                rows={6} placeholder={importFormat === "csv" ? "Name,Price,Category,Description,FoodType" : '[{ "name": "Paneer Tikka", "price": 280 }]'}
-                style={{ ...input, fontFamily: "monospace", fontSize: 12.5, resize: "vertical" }} />
+              {importFormat === "zip" ? (
+                <div style={{ marginBottom: 10 }}>
+                  <input type="file" accept=".zip" style={{ fontSize: 13 }}
+                    onChange={(e) => handleZipFileSelected(e.target.files?.[0])} />
+                  {zipParsing && <p style={{ fontSize: 13, color: "#888", marginTop: 8 }}>Reading zip file…</p>}
+                  {zipFile && !zipParsing && !importPreview?.error && <p style={{ fontSize: 12.5, color: "#16a34a", fontWeight: 600, marginTop: 8 }}>Loaded {zipFile.name}</p>}
+                  <p style={{ fontSize: 12, color: "#999", marginTop: 8, lineHeight: 1.6 }}>
+                    One menu.csv (with an ImageFile column, e.g. paneer-tikka.jpg) plus an images/
+                    folder of matching photos. Photos are uploaded to Cloudinary automatically.
+                  </p>
+                </div>
+              ) : (
+                <textarea value={importText} onChange={(e) => { setImportText(e.target.value); setImportPreview(null); }}
+                  rows={6} placeholder={importFormat === "csv" ? "Name,Price,Category,Description,FoodType,Variations,Addons" : '[{ "name": "Paneer Tikka", "price": 280 }]'}
+                  style={{ ...input, fontFamily: "monospace", fontSize: 12.5, resize: "vertical" }} />
+              )}
 
               <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-                <button style={btn} disabled={!importText.trim()}
-                  onClick={() => setImportPreview(parseMenuText(importText, importFormat))}>
-                  Preview
-                </button>
+                {importFormat !== "zip" && (
+                  <button style={btn} disabled={!importText.trim()}
+                    onClick={() => setImportPreview(parseMenuText(importText, importFormat))}>
+                    Preview
+                  </button>
+                )}
                 {importPreview?.items?.length > 0 && (
-                  <button style={btnPrimary} disabled={busy}
+                  <button style={btnPrimary} disabled={busy || zipParsing}
                     onClick={() => run(async () => {
-                      const res = await importMasterItems(brandId, importPreview.items, master);
+                      const res = importFormat === "zip"
+                        ? await importZipItems()
+                        : await importMasterItems(brandId, importPreview.items, master);
                       setImportPreview(null);
                       setImportText("");
+                      setZipFile(null);
+                      setZipImages({});
                       setSavedNote(res.added === 0
                         ? `Nothing added — all ${res.duplicates} were already on the master menu.`
                         : `Added ${res.added} item${res.added === 1 ? "" : "s"}${res.duplicates ? `, skipped ${res.duplicates} already present` : ""}.`);
@@ -454,12 +556,25 @@ function BrandConsoleInner() {
                 )}
               </div>
 
+              {zipUploadProgress && (
+                <p style={{ fontSize: 12.5, color: "#888", marginTop: 10 }}>
+                  Uploading photos… {zipUploadProgress.done}/{zipUploadProgress.total}
+                </p>
+              )}
+
               {importPreview && (
                 <div style={{ marginTop: 12, padding: 12, borderRadius: 10, fontSize: 13,
                   background: importPreview.error ? "#fef2f2" : "#f0fdf4",
                   border: `1px solid ${importPreview.error ? "#fecaca" : "#bbf7d0"}`,
                   color: importPreview.error ? "#b91c1c" : "#166534" }}>
                   {importPreview.error || `Ready to import ${importPreview.items.length} item${importPreview.items.length === 1 ? "" : "s"}.`}
+                  {importPreview.isZip && !importPreview.error && (
+                    <div style={{ marginTop: 4, fontSize: 12 }}>
+                      {importPreview.items.filter((it) => it.imageMatchStatus === "matched").length} photo{importPreview.items.filter((it) => it.imageMatchStatus === "matched").length === 1 ? "" : "s"} matched.
+                      {importPreview.items.some((it) => it.imageMatchStatus === "missing") &&
+                        ` ${importPreview.items.filter((it) => it.imageMatchStatus === "missing").length} listed an ImageFile not found in the zip.`}
+                    </div>
+                  )}
                   {importPreview.skipped?.length > 0 && (
                     <div style={{ marginTop: 6, fontSize: 12 }}>
                       Skipping {importPreview.skipped.length} row{importPreview.skipped.length === 1 ? "" : "s"}:{" "}

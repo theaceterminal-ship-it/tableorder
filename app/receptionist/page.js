@@ -37,7 +37,7 @@ import { can } from "@/lib/tenancy";
 import { fetchMasterMenu, seedOutletFromMaster } from "@/lib/brand";
 import {
   parseCSV, parseCSVLine, truthy, cleanPrice, parseImportRows, matchImageFile,
-  normalizeFoodType as normalizeFoodTypeShared,
+  normalizeFoodType as normalizeFoodTypeShared, extractZipEntries, uploadWithConcurrency,
 } from "@/lib/menu-import";
 import {
   computeAnalytics as computeAnalyticsPure, buildTodayReport, filterLabel,
@@ -1692,52 +1692,10 @@ function ReceptionPage() {
     return parseImportRows(text, format, { pureVeg: siteSettings.pureVeg });
   }
 
-  // === NEW: ZIP (CSV + photos) helpers ===
-  // Matches an item's ImageFile value (from the CSV) to a file inside the zip's
-  // images/ folder — case-insensitive, and falls back to matching by filename
-  // with the extension ignored (so "dosa.jpg" in the CSV still matches "dosa.png").
-  // Unzips the uploaded file, locates the first .csv inside it, and collects
-  // every image file into a flat { filename: JSZipObject } map (regardless of
-  // which subfolder it's actually in, so "images/x.jpg" is keyed just as "x.jpg").
-  async function extractZip(file) {
-    const zip = await JSZip.loadAsync(file);
-    let csvEntry = null;
-    const imagesMap = {};
-    zip.forEach((relPath, entry) => {
-      if (entry.dir) return;
-      const lower = relPath.toLowerCase();
-      if (lower.endsWith(".csv") && !csvEntry) csvEntry = entry;
-      else if (/\.(jpe?g|png|webp|gif)$/i.test(lower)) {
-        imagesMap[relPath.split("/").pop().toLowerCase()] = entry;
-      }
-    });
-    if (!csvEntry) throw new Error("No .csv file found inside the zip. Make sure menu.csv is at the top level.");
-    const csvText = await csvEntry.async("string");
-    return { csvText, imagesMap };
-  }
-
-  // Runs async tasks with a limited number in flight at once (default 5) instead
-  // of firing everything simultaneously or waiting for fixed batches to finish —
-  // keeps the browser and Cloudinary from being hit all at once, while still
-  // uploading continuously with no idle gaps between "rounds".
-  async function uploadWithConcurrency(tasks, concurrency, onProgress) {
-    let nextIndex = 0;
-    let doneCount = 0;
-    const results = new Array(tasks.length);
-    async function worker() {
-      while (nextIndex < tasks.length) {
-        const current = nextIndex++;
-        try { results[current] = await tasks[current](); }
-        catch (err) { results[current] = { error: err?.message || "Upload failed" }; }
-        doneCount++;
-        if (onProgress) onProgress(doneCount, tasks.length);
-      }
-    }
-    const workerCount = Math.min(concurrency, tasks.length) || 1;
-    await Promise.all(Array.from({ length: workerCount }, () => worker()));
-    return results;
-  }
-
+  // === NEW: ZIP (CSV + photos) ===
+  // extractZipEntries, uploadWithConcurrency and matchImageFile now live in
+  // lib/menu-import.js, shared with the brand master-menu importer — this
+  // used to be the one piece of the bulk importer that only existed here.
   async function handleZipFileSelected(file) {
     if (!file) return;
     setZipFile(file);
@@ -1745,7 +1703,7 @@ function ReceptionPage() {
     setImportPreview(null);
     setImportReport(null);
     try {
-      const { csvText, imagesMap } = await extractZip(file);
+      const { csvText, imagesMap } = await extractZipEntries(file);
       setZipImages(imagesMap);
       const result = parseImportData(csvText, "csv");
       if (result.error) {
@@ -1763,10 +1721,10 @@ function ReceptionPage() {
   async function downloadZipTemplate() {
     const zip = new JSZip();
     zip.file("menu.csv",
-`Name,Price,Category,Description,FoodType,ChefSpecial,Featured,ImageFile
-Paneer Tikka,320,Starters,Cottage cheese marinated in spices,veg,no,no,paneer-tikka.jpg
-Butter Chicken,450,Mains,Tender chicken in rich tomato gravy,nonveg,yes,yes,butter-chicken.jpg
-Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,
+`Name,Price,Category,Description,FoodType,ChefSpecial,Featured,ImageFile,Variations,Addons,ETA,BOGO
+Paneer Tikka,320,Starters,Cottage cheese marinated in spices,veg,no,no,paneer-tikka.jpg,,,15,no
+Margherita Pizza,320,Mains,Classic tomato and mozzarella,veg,no,yes,pizza.jpg,"Small:220|Medium:320|Large:420","Extra Cheese:40|Extra Olives:30",20,no
+Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,,,,10,yes
 `);
     zip.file("images/README.txt", "Put your photos in this folder.\nName each file to exactly match the ImageFile column in menu.csv (e.g. paneer-tikka.jpg).\nSupported formats: jpg, jpeg, png, webp, gif.\nThese photos are uploaded to Cloudinary automatically during import — you don't need to upload them anywhere yourself.");
     const blob = await zip.generateAsync({ type: "blob" });
@@ -1836,11 +1794,11 @@ Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,
   // link (Cloudinary, imgur, etc.) — CSV alone has no way to attach local
   // photo files. Use the ZIP format if you want to upload local photos.
   function downloadTemplate() {
-    const csv = `Name,Price,Category,Description,FoodType,ChefSpecial,Featured,ImageUrl
-Paneer Tikka,320,Starters,Cottage cheese marinated in spices,veg,no,no,
-Butter Chicken,450,Mains,Tender chicken in rich tomato gravy,nonveg,yes,yes,
-Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,
-Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,yes,`;
+    const csv = `Name,Price,Category,Description,FoodType,ChefSpecial,Featured,ImageUrl,Variations,Addons,ETA,BOGO
+Paneer Tikka,320,Starters,Cottage cheese marinated in spices,veg,no,no,,,,15,no
+Margherita Pizza,320,Mains,Classic tomato and mozzarella,veg,no,yes,,"Small:220|Medium:320|Large:420","Extra Cheese:40|Extra Olives:30",20,no
+Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,,,,10,yes
+Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,yes,,,,12,no`;
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -1858,8 +1816,16 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
   function downloadJsonTemplate() {
     const json = JSON.stringify([
       { name: "Paneer Tikka", price: 320, category: "Starters", description: "Cottage cheese marinated in spices", foodType: "veg", chefSpecial: false, featured: false, imageUrl: "" },
-      { name: "Butter Chicken", price: 450, category: "Mains", description: "Tender chicken in rich tomato gravy", foodType: "nonveg", chefSpecial: true, featured: true, imageUrl: "" },
-      { name: "Garlic Naan", price: 80, category: "Breads & Rice", description: "Soft naan brushed with garlic butter", foodType: "veg", chefSpecial: false, featured: false, imageUrl: "" },
+      {
+        name: "Margherita Pizza", price: 320, category: "Mains", description: "Classic tomato and mozzarella", foodType: "veg", chefSpecial: false, featured: true, imageUrl: "",
+        // One dish, one row — sizes and add-ons are a real array here (a
+        // pipe-delimited string like the CSV format uses also works, but
+        // there's no reason to flatten it when the format is already JSON).
+        variations: [{ name: "Small", price: 220 }, { name: "Medium", price: 320 }, { name: "Large", price: 420 }],
+        addons: [{ name: "Extra Cheese", price: 40 }, { name: "Extra Olives", price: 30 }],
+        etaMinutes: 20,
+      },
+      { name: "Garlic Naan", price: 80, category: "Breads & Rice", description: "Soft naan brushed with garlic butter", foodType: "veg", chefSpecial: false, featured: false, imageUrl: "", etaMinutes: 10, bogoEnabled: true },
     ], null, 2);
     const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -3195,10 +3161,16 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
 
           <p style={{ fontSize: 12.5, color: "#6b6b7b", marginBottom: 12 }}>
             {importFormat === "csv"
-              ? "Upload a .csv file or paste CSV text below. Columns: Name, Price, Category, Description, FoodType, ChefSpecial, Featured, ImageUrl. (ImageUrl must already be a hosted link — CSV can't carry local photo files.)"
+              ? "Upload a .csv file or paste CSV text below. Columns: Name, Price, Category, Description, FoodType, ChefSpecial, Featured, ImageUrl, Variations, Addons, ETA, BOGO. (ImageUrl must already be a hosted link — CSV can't carry local photo files.)"
               : importFormat === "json"
-              ? "Upload a .json file or paste a JSON array below. Each object needs: name, price, category. Optional: description, foodType, chefSpecial, featured, imageUrl."
+              ? "Upload a .json file or paste a JSON array below. Each object needs: name, price, category. Optional: description, foodType, chefSpecial, featured, imageUrl, etaMinutes, bogoEnabled, variations, addons."
               : "Upload a .zip containing one menu.csv (with an ImageFile column, e.g. paneer-tikka.jpg) and an images/ folder with matching photos. Photos are uploaded to Cloudinary automatically — no manual upload needed."}
+          </p>
+          <p style={{ fontSize: 12, color: "#a08a5c", marginTop: -6, marginBottom: 12, lineHeight: 1.6 }}>
+            A dish with sizes or add-ons stays <strong>one row</strong>, not several — put them in the
+            Variations / Addons column as <code>Small:180|Medium:250|Large:320</code>. Three separate rows
+            for "Pizza Small", "Pizza Medium" and "Pizza Large" import as three unrelated menu items, not
+            one dish with three sizes.
           </p>
 
           {importFormat === "zip" ? (
@@ -3223,8 +3195,8 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
                 value={importText}
                 onChange={(e) => { setImportText(e.target.value); setImportPreview(null); }}
                 placeholder={importFormat === "csv"
-                  ? `Name,Price,Category,Description,FoodType,ChefSpecial,Featured,ImageUrl\nPaneer Tikka,320,Starters,Marinated cottage cheese,veg,no,no,`
-                  : `[\n  {\n    "name": "Paneer Tikka",\n    "price": 320,\n    "category": "Starters",\n    "description": "Marinated cottage cheese",\n    "foodType": "veg",\n    "chefSpecial": false,\n    "featured": false\n  }\n]`}
+                  ? `Name,Price,Category,Description,FoodType,ChefSpecial,Featured,ImageUrl,Variations,Addons,ETA,BOGO\nMargherita Pizza,320,Mains,Classic tomato and mozzarella,veg,no,yes,,"Small:220|Medium:320|Large:420","Extra Cheese:40",20,no`
+                  : `[\n  {\n    "name": "Margherita Pizza",\n    "price": 320,\n    "category": "Mains",\n    "foodType": "veg",\n    "variations": [{"name":"Small","price":220},{"name":"Medium","price":320},{"name":"Large","price":420}],\n    "addons": [{"name":"Extra Cheese","price":40}]\n  }\n]`}
                 style={{ width: "100%", minHeight: 160, padding: 14, borderRadius: 10, border: "1px solid #e6e1d6", fontSize: 13, fontFamily: "monospace", resize: "vertical", marginBottom: 12, boxSizing: "border-box" }}
               />
 
