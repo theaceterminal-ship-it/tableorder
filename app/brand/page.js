@@ -14,7 +14,7 @@ import { useAuth } from "@/lib/auth-context";
 import { AuthGuard } from "@/lib/auth-guard";
 import {
   fetchOutlets, fetchBrandToday, createOutlet, renameOutlet,
-  fetchMasterMenu, addMasterItem, deleteMasterItem,
+  fetchMasterMenu, addMasterItem, updateMasterItem, deleteMasterItem,
   listBrandMembers, listOutletStaff, removeBrandMember, removeOutletStaff,
   importMasterItems, updateMyProfile, updateBrandIdentity,
 } from "@/lib/brand";
@@ -23,6 +23,7 @@ import {
 } from "@/lib/menu-import";
 import { uploadToCloudinary } from "@/lib/firebase";
 import JSZip from "jszip";
+import VariationsAddonsEditor, { cleanRows } from "@/components/VariationsAddonsEditor";
 import {
   can, canAccessOutlet, canInvite, ROLE_LABELS, TIER_LABELS, ROLES,
   tierLimits, canAddOutlet,
@@ -77,7 +78,15 @@ function BrandConsoleInner() {
   const [myProfile, setMyProfile] = useState({ name: "", phone: "" });
   const [identity, setIdentity] = useState({ name: "", logoUrl: "", accentColor: "#e8a33d" });
   const [savedNote, setSavedNote] = useState("");
-  const [newItem, setNewItem] = useState({ name: "", price: "", category: "Mains", foodType: "veg", description: "" });
+  const [newItem, setNewItem] = useState({
+    name: "", price: "", category: "Mains", foodType: "veg", description: "", etaMinutes: "",
+    chefSpecial: false, featured: false, bogoEnabled: false, variations: [], addons: [],
+  });
+  // Master-menu item edit — the list below only ever supported Add/Remove;
+  // an item's sizes/add-ons/chef-special/featured could be set on the way
+  // in (bulk import) but never seen or changed again afterward.
+  const [editingMasterId, setEditingMasterId] = useState(null);
+  const [editMasterForm, setEditMasterForm] = useState(null);
 
   // Only outlets this person actually reaches. An owner reaches all of them;
   // a manager reaches the ones they were assigned.
@@ -147,6 +156,46 @@ function BrandConsoleInner() {
     } finally {
       setBusy(false);
     }
+  }
+
+  // === Master-menu item edit ===
+  // Previously the only two operations here were Add and Remove — an item's
+  // sizes, add-ons, chef-special or featured flag could be set going in (a
+  // bulk import writes them fine) but never seen or changed again once it
+  // landed, since the list below never rendered them and there was no edit
+  // form to open.
+  function startEditMaster(item) {
+    setEditingMasterId(item.id);
+    setEditMasterForm({
+      name: item.name || "", price: item.price || "", category: item.category || "Mains",
+      foodType: item.foodType || "veg", description: item.description || "",
+      etaMinutes: item.etaMinutes || "", chefSpecial: !!item.chefSpecial, featured: !!item.featured,
+      bogoEnabled: !!item.bogoEnabled, variations: item.variations || [], addons: item.addons || [],
+    });
+  }
+  function cancelEditMaster() {
+    setEditingMasterId(null);
+    setEditMasterForm(null);
+  }
+  async function saveEditMaster() {
+    if (!editMasterForm.name.trim() || !editMasterForm.price) return;
+    await run(async () => {
+      await updateMasterItem(brandId, editingMasterId, {
+        name: editMasterForm.name.trim(),
+        price: parseFloat(editMasterForm.price) || 0,
+        category: editMasterForm.category.trim() || "Mains",
+        foodType: editMasterForm.foodType || "veg",
+        description: editMasterForm.description || "",
+        etaMinutes: parseInt(editMasterForm.etaMinutes) || 15,
+        chefSpecial: !!editMasterForm.chefSpecial,
+        featured: !!editMasterForm.featured,
+        bogoEnabled: !!editMasterForm.bogoEnabled,
+        variations: cleanRows(editMasterForm.variations),
+        addons: cleanRows(editMasterForm.addons),
+      });
+      setEditingMasterId(null);
+      setEditMasterForm(null);
+    });
   }
 
   // === ZIP (CSV + photos) master-menu import ===
@@ -446,7 +495,7 @@ Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,,,,1
                 <br />
                 Editing an item here does <strong>not</strong> change outlets that already seeded it.
               </p>
-              <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr auto", gap: 10, alignItems: "end" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 10 }}>
                 <div>
                   <label style={label}>Item name</label>
                   <input style={input} value={newItem.name} placeholder="Paneer Tikka"
@@ -462,14 +511,50 @@ Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,,,,1
                   <input style={input} value={newItem.category}
                     onChange={(e) => setNewItem((p) => ({ ...p, category: e.target.value }))} />
                 </div>
-                <button style={btnPrimary} disabled={busy}
-                  onClick={() => run(async () => {
-                    await addMasterItem(brandId, newItem);
-                    setNewItem({ name: "", price: "", category: newItem.category, foodType: "veg", description: "" });
-                  })}>
-                  Add
-                </button>
               </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 10 }}>
+                <div>
+                  <label style={label}>Description</label>
+                  <input style={input} value={newItem.description} placeholder="Optional"
+                    onChange={(e) => setNewItem((p) => ({ ...p, description: e.target.value }))} />
+                </div>
+                <div>
+                  <label style={label}>Food type</label>
+                  <select style={input} value={newItem.foodType}
+                    onChange={(e) => setNewItem((p) => ({ ...p, foodType: e.target.value }))}>
+                    <option value="veg">Veg</option>
+                    <option value="nonveg">Non-veg</option>
+                  </select>
+                </div>
+                <div>
+                  <label style={label}>Prep time (min)</label>
+                  <input style={input} type="number" placeholder="15" value={newItem.etaMinutes}
+                    onChange={(e) => setNewItem((p) => ({ ...p, etaMinutes: e.target.value }))} />
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: 18, marginBottom: 14, flexWrap: "wrap" }}>
+                {[["chefSpecial", "👨‍🍳 Chef's Special"], ["featured", "⭐ Featured"], ["bogoEnabled", "🎁 Buy 1 Get 1 Free"]].map(([key, lbl]) => (
+                  <label key={key} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                    <input type="checkbox" checked={!!newItem[key]} onChange={(e) => setNewItem((p) => ({ ...p, [key]: e.target.checked }))} />
+                    {lbl}
+                  </label>
+                ))}
+              </div>
+
+              <VariationsAddonsEditor form={newItem} setForm={setNewItem} inputStyle={input} labelStyle={label} />
+
+              <button style={btnPrimary} disabled={busy || !newItem.name.trim() || !newItem.price}
+                onClick={() => run(async () => {
+                  await addMasterItem(brandId, { ...newItem, variations: cleanRows(newItem.variations), addons: cleanRows(newItem.addons) });
+                  setNewItem({
+                    name: "", price: "", category: newItem.category, foodType: "veg", description: "", etaMinutes: "",
+                    chefSpecial: false, featured: false, bogoEnabled: false, variations: [], addons: [],
+                  });
+                })}>
+                Add item
+              </button>
             </div>
 
             <div style={card}>
@@ -596,12 +681,71 @@ Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,,,,1
               <h3 style={{ fontSize: 14.5, fontWeight: 800, margin: "0 0 12px" }}>{master.length} item{master.length === 1 ? "" : "s"}</h3>
               {master.length === 0 ? (
                 <p style={{ color: "#888", fontSize: 14 }}>Nothing here yet. Items you add become available to every outlet.</p>
-              ) : master.map((m) => (
-                <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderTop: "1px solid #f0ebe3" }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600 }}>{m.name}</div>
-                    <div style={{ fontSize: 12, color: "#888" }}>{m.category} · {money(m.price)}</div>
+              ) : master.map((m) => editingMasterId === m.id ? (
+                <div key={m.id} style={{ padding: "14px 0", borderTop: "1px solid #f0ebe3" }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 10 }}>
+                    <div>
+                      <label style={label}>Item name</label>
+                      <input style={input} value={editMasterForm.name} onChange={(e) => setEditMasterForm((p) => ({ ...p, name: e.target.value }))} />
+                    </div>
+                    <div>
+                      <label style={label}>Price</label>
+                      <input style={input} type="number" value={editMasterForm.price} onChange={(e) => setEditMasterForm((p) => ({ ...p, price: e.target.value }))} />
+                    </div>
+                    <div>
+                      <label style={label}>Category</label>
+                      <input style={input} value={editMasterForm.category} onChange={(e) => setEditMasterForm((p) => ({ ...p, category: e.target.value }))} />
+                    </div>
                   </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 10 }}>
+                    <div>
+                      <label style={label}>Description</label>
+                      <input style={input} value={editMasterForm.description} onChange={(e) => setEditMasterForm((p) => ({ ...p, description: e.target.value }))} />
+                    </div>
+                    <div>
+                      <label style={label}>Food type</label>
+                      <select style={input} value={editMasterForm.foodType} onChange={(e) => setEditMasterForm((p) => ({ ...p, foodType: e.target.value }))}>
+                        <option value="veg">Veg</option>
+                        <option value="nonveg">Non-veg</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label style={label}>Prep time (min)</label>
+                      <input style={input} type="number" value={editMasterForm.etaMinutes} onChange={(e) => setEditMasterForm((p) => ({ ...p, etaMinutes: e.target.value }))} />
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 18, marginBottom: 14, flexWrap: "wrap" }}>
+                    {[["chefSpecial", "👨‍🍳 Chef's Special"], ["featured", "⭐ Featured"], ["bogoEnabled", "🎁 Buy 1 Get 1 Free"]].map(([key, lbl]) => (
+                      <label key={key} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                        <input type="checkbox" checked={!!editMasterForm[key]} onChange={(e) => setEditMasterForm((p) => ({ ...p, [key]: e.target.checked }))} />
+                        {lbl}
+                      </label>
+                    ))}
+                  </div>
+                  <VariationsAddonsEditor form={editMasterForm} setForm={setEditMasterForm} inputStyle={input} labelStyle={label} />
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button style={btnPrimary} disabled={busy || !editMasterForm.name.trim() || !editMasterForm.price} onClick={saveEditMaster}>Save</button>
+                    <button style={btn} onClick={cancelEditMaster}>Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderTop: "1px solid #f0ebe3" }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{ fontWeight: 600 }}>{m.name}</span>
+                      {m.chefSpecial && <span style={{ background: "#7c2d12", color: "#fff", fontSize: 10, fontWeight: 800, padding: "2px 8px", borderRadius: 100 }}>👨‍🍳 CHEF&apos;S</span>}
+                      {m.featured && <span style={{ background: "#a16207", color: "#fff", fontSize: 10, fontWeight: 800, padding: "2px 8px", borderRadius: 100 }}>⭐ FEATURED</span>}
+                      {m.bogoEnabled && <span style={{ background: "#166534", color: "#fff", fontSize: 10, fontWeight: 800, padding: "2px 8px", borderRadius: 100 }}>🎁 BOGO</span>}
+                      {m.variations?.length > 0 && <span style={{ background: "#0369a1", color: "#fff", fontSize: 10, fontWeight: 800, padding: "2px 8px", borderRadius: 100 }}>{m.variations.length} SIZES</span>}
+                      {m.addons?.length > 0 && <span style={{ background: "#4338ca", color: "#fff", fontSize: 10, fontWeight: 800, padding: "2px 8px", borderRadius: 100 }}>+{m.addons.length} ADD-ONS</span>}
+                    </div>
+                    <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
+                      {m.category} · {m.variations?.length > 0 ? `From ${money(Math.min(...m.variations.map((v) => v.price)))}` : money(m.price)}
+                    </div>
+                  </div>
+                  <button style={{ ...btn, padding: "6px 11px", fontSize: 12.5 }} onClick={() => startEditMaster(m)}>
+                    Edit
+                  </button>
                   <button style={{ ...btn, padding: "6px 11px", fontSize: 12.5, color: "#dc2626", borderColor: "#fecaca" }}
                     onClick={() => { if (confirm(`Remove ${m.name} from the master menu?`)) run(() => deleteMasterItem(brandId, m.id)); }}>
                     Remove
