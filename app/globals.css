@@ -1,3 +1,9 @@
+/* Fraunces (display headings) + Inter — the POS screen (app/receptionist)
+   already loads these via its own inline @import; hoisted here so any other
+   page (the brand console, for one) can use the same fonts without each
+   page re-declaring the same import. */
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Inter:wght@400;500;600;700;800&display=swap');
+
 :root {
   --bg: #faf8f5;
   --surface: #ffffff;

@@ -8,7 +8,7 @@
 // its own; it asks can() and canInvite() and renders accordingly, while the
 // security rules enforce the same thing independently.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { AuthGuard } from "@/lib/auth-guard";
@@ -32,11 +32,17 @@ import { listInvites, createInvite, revokeInvite, INVITABLE_ROLES } from "@/lib/
 
 const money = (n) => `₹${(n || 0).toLocaleString("en-IN")}`;
 
-const card = { background: "#fff", border: "1px solid #e6e1d6", borderRadius: 16, padding: 22, marginBottom: 16 };
+// These five are the whole visual identity of this console — every card,
+// button, and input on the page renders through one of them. Their values
+// are lifted straight from app/receptionist/page.js's own local overrides
+// (its <style> block further down, plus its .btn-primary amber), so the
+// owner/manager console and the POS floor staff actually use share the same
+// look rather than two consoles that merely resemble each other.
+const card = { background: "#fff", border: "1px solid #e6e1d6", borderRadius: 14, padding: 22, marginBottom: 16, boxShadow: "0 1px 3px rgba(20,20,30,0.05), 0 1px 2px rgba(20,20,30,0.03)" };
 const label = { fontSize: 11.5, fontWeight: 800, color: "#6b6b7b", textTransform: "uppercase", letterSpacing: 0.4, display: "block", marginBottom: 6 };
-const input = { width: "100%", padding: "11px 13px", border: "1px solid #e6e1d6", borderRadius: 10, fontSize: 14, boxSizing: "border-box", fontFamily: "inherit" };
-const btn = { padding: "10px 16px", borderRadius: 10, border: "1px solid #e6e1d6", background: "#fff", fontWeight: 700, fontSize: 13.5, cursor: "pointer", fontFamily: "inherit" };
-const btnPrimary = { ...btn, background: "#1a1a2e", color: "#fff", border: "1px solid #1a1a2e" };
+const input = { width: "100%", padding: "11px 14px", border: "1px solid #e6e1d6", borderRadius: 10, fontSize: 14, boxSizing: "border-box", fontFamily: "inherit", background: "#fff" };
+const btn = { padding: "11px 20px", borderRadius: 10, border: "1px solid #e6e1d6", background: "#f3efe6", color: "#6b6b7b", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, transition: "transform 0.12s ease, filter 0.12s ease" };
+const btnPrimary = { ...btn, background: "#e8a33d", color: "#fff", border: "none", boxShadow: "0 2px 6px rgba(232,163,61,0.35)" };
 
 function Stat({ k, v, sub }) {
   return (
@@ -84,7 +90,7 @@ function BrandConsoleInner() {
   const [identity, setIdentity] = useState({ name: "", logoUrl: "", accentColor: "#e8a33d" });
   const [savedNote, setSavedNote] = useState("");
   const [newItem, setNewItem] = useState({
-    name: "", price: "", category: "Mains", foodType: "veg", description: "", etaMinutes: "",
+    name: "", price: "", category: "Mains", foodType: "veg", description: "", etaMinutes: "", imageUrl: "",
     chefSpecial: false, featured: false, bogoEnabled: false, variations: [], addons: [],
   });
   // Master-menu item edit — the list below only ever supported Add/Remove;
@@ -92,6 +98,16 @@ function BrandConsoleInner() {
   // in (bulk import) but never seen or changed again afterward.
   const [editingMasterId, setEditingMasterId] = useState(null);
   const [editMasterForm, setEditMasterForm] = useState(null);
+  // The Add-item form and Bulk import panel used to sit permanently open on
+  // the page. Collapsed behind their own buttons now, same as the reference
+  // dashboard's "+ New Menu Item" / "Import/Export" — the item LIST is what
+  // someone actually wants to see on landing here, not two open forms above it.
+  const [showAddItemForm, setShowAddItemForm] = useState(false);
+  const [showBulkImport, setShowBulkImport] = useState(false);
+  const [newItemUploading, setNewItemUploading] = useState(false);
+  const [editItemUploading, setEditItemUploading] = useState(false);
+  const newItemFileRef = useRef(null);
+  const editItemFileRef = useRef(null);
 
   // Only outlets this person actually reaches. An owner reaches all of them;
   // a manager reaches the ones they were assigned.
@@ -169,6 +185,25 @@ function BrandConsoleInner() {
     }
   }
 
+  // Same guard and upload call the outlet POS uses for every photo it takes
+  // (menu items, categories, combos, offer banners, the logo) — 5MB cap,
+  // image-only, straight to Cloudinary.
+  async function uploadMasterItemImage(file, isEdit) {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { alert("Please select an image file"); return; }
+    if (file.size > 5 * 1024 * 1024) { alert("Image must be under 5MB"); return; }
+    if (isEdit) setEditItemUploading(true); else setNewItemUploading(true);
+    try {
+      const url = await uploadToCloudinary(file);
+      if (isEdit) setEditMasterForm((p) => ({ ...p, imageUrl: url }));
+      else setNewItem((p) => ({ ...p, imageUrl: url }));
+    } catch (err) {
+      alert("Upload failed: " + err.message);
+    } finally {
+      if (isEdit) setEditItemUploading(false); else setNewItemUploading(false);
+    }
+  }
+
   // === Master-menu item edit ===
   // Previously the only two operations here were Add and Remove — an item's
   // sizes, add-ons, chef-special or featured flag could be set going in (a
@@ -179,7 +214,7 @@ function BrandConsoleInner() {
     setEditingMasterId(item.id);
     setEditMasterForm({
       name: item.name || "", price: item.price || "", category: item.category || "Mains",
-      foodType: item.foodType || "veg", description: item.description || "",
+      foodType: item.foodType || "veg", description: item.description || "", imageUrl: item.imageUrl || "",
       etaMinutes: item.etaMinutes || "", chefSpecial: !!item.chefSpecial, featured: !!item.featured,
       bogoEnabled: !!item.bogoEnabled, variations: item.variations || [], addons: item.addons || [],
     });
@@ -197,6 +232,7 @@ function BrandConsoleInner() {
         category: editMasterForm.category.trim() || "Mains",
         foodType: editMasterForm.foodType || "veg",
         description: editMasterForm.description || "",
+        imageUrl: editMasterForm.imageUrl || "",
         etaMinutes: parseInt(editMasterForm.etaMinutes) || 15,
         chefSpecial: !!editMasterForm.chefSpecial,
         featured: !!editMasterForm.featured,
@@ -323,7 +359,7 @@ Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,,,,1
   const accent = brand.accentColor || "#e8a33d";
 
   return (
-    <div style={{ minHeight: "100vh", background: "#faf9f7" }}>
+    <div style={{ minHeight: "100vh", background: "#faf9f7", fontFamily: "'Inter', sans-serif" }}>
       <header style={{ background: "#fff", borderBottom: "1px solid #e6e1d6", padding: "16px 24px" }}>
         <div style={{ maxWidth: 1100, margin: "0 auto", display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -506,68 +542,104 @@ Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,,,,1
                 <br />
                 Editing an item here does <strong>not</strong> change outlets that already seeded it.
               </p>
-              <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 10 }}>
-                <div>
-                  <label style={label}>Item name</label>
-                  <input style={input} value={newItem.name} placeholder="Paneer Tikka"
-                    onChange={(e) => setNewItem((p) => ({ ...p, name: e.target.value }))} />
-                </div>
-                <div>
-                  <label style={label}>Price</label>
-                  <input style={input} type="number" value={newItem.price}
-                    onChange={(e) => setNewItem((p) => ({ ...p, price: e.target.value }))} />
-                </div>
-                <div>
-                  <label style={label}>Category</label>
-                  <input style={input} value={newItem.category}
-                    onChange={(e) => setNewItem((p) => ({ ...p, category: e.target.value }))} />
-                </div>
+
+              {/* Both used to sit permanently open above the item list. Two forms
+                  a manager has to scroll past just to see their menu — collapsed
+                  behind their own buttons now, same shape as the reference
+                  dashboard's "+ New Menu Item" / "Import/Export". */}
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button style={btnPrimary} onClick={() => { setShowAddItemForm((s) => !s); setShowBulkImport(false); }}>
+                  {showAddItemForm ? "✕ Close" : "+ New Menu Item"}
+                </button>
+                <button style={btn} onClick={() => { setShowBulkImport((s) => !s); setShowAddItemForm(false); }}>
+                  {showBulkImport ? "✕ Close" : "⇅ Bulk Import"}
+                </button>
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 10 }}>
-                <div>
-                  <label style={label}>Description</label>
-                  <input style={input} value={newItem.description} placeholder="Optional"
-                    onChange={(e) => setNewItem((p) => ({ ...p, description: e.target.value }))} />
-                </div>
-                <div>
-                  <label style={label}>Food type</label>
-                  <select style={input} value={newItem.foodType}
-                    onChange={(e) => setNewItem((p) => ({ ...p, foodType: e.target.value }))}>
-                    <option value="veg">Veg</option>
-                    <option value="nonveg">Non-veg</option>
-                  </select>
-                </div>
-                <div>
-                  <label style={label}>Prep time (min)</label>
-                  <input style={input} type="number" placeholder="15" value={newItem.etaMinutes}
-                    onChange={(e) => setNewItem((p) => ({ ...p, etaMinutes: e.target.value }))} />
-                </div>
-              </div>
+              {showAddItemForm && (
+                <div style={{ marginTop: 18, paddingTop: 18, borderTop: "1px dashed #e6e1d6" }}>
+                  <div style={{ display: "flex", gap: 16, marginBottom: 10, flexWrap: "wrap" }}>
+                    <div>
+                      <label style={label}>Photo</label>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        {newItem.imageUrl && (
+                          <img src={newItem.imageUrl} alt="" style={{ width: 52, height: 52, borderRadius: 10, objectFit: "cover", border: "1px solid #e6e1d6" }} />
+                        )}
+                        <input ref={newItemFileRef} type="file" accept="image/*" style={{ display: "none" }}
+                          onChange={(e) => uploadMasterItemImage(e.target.files?.[0], false)} />
+                        <button type="button" style={{ ...btn, padding: "9px 14px", fontSize: 12.5, border: "2px dashed #e6e1d6" }}
+                          disabled={newItemUploading} onClick={() => newItemFileRef.current?.click()}>
+                          {newItemUploading ? "Uploading…" : newItem.imageUrl ? "Change photo" : "Choose photo"}
+                        </button>
+                      </div>
+                    </div>
+                    <div style={{ flex: 1, minWidth: 200 }}>
+                      <label style={label}>Item name</label>
+                      <input style={input} value={newItem.name} placeholder="Paneer Tikka"
+                        onChange={(e) => setNewItem((p) => ({ ...p, name: e.target.value }))} />
+                    </div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 10 }}>
+                    <div>
+                      <label style={label}>Price</label>
+                      <input style={input} type="number" value={newItem.price}
+                        onChange={(e) => setNewItem((p) => ({ ...p, price: e.target.value }))} />
+                    </div>
+                    <div>
+                      <label style={label}>Category</label>
+                      <input style={input} value={newItem.category}
+                        onChange={(e) => setNewItem((p) => ({ ...p, category: e.target.value }))} />
+                    </div>
+                    <div>
+                      <label style={label}>Prep time (min)</label>
+                      <input style={input} type="number" placeholder="15" value={newItem.etaMinutes}
+                        onChange={(e) => setNewItem((p) => ({ ...p, etaMinutes: e.target.value }))} />
+                    </div>
+                  </div>
 
-              <div style={{ display: "flex", gap: 18, marginBottom: 14, flexWrap: "wrap" }}>
-                {[["chefSpecial", "👨‍🍳 Chef's Special"], ["featured", "⭐ Featured"], ["bogoEnabled", "🎁 Buy 1 Get 1 Free"]].map(([key, lbl]) => (
-                  <label key={key} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
-                    <input type="checkbox" checked={!!newItem[key]} onChange={(e) => setNewItem((p) => ({ ...p, [key]: e.target.checked }))} />
-                    {lbl}
-                  </label>
-                ))}
-              </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 10 }}>
+                    <div>
+                      <label style={label}>Description</label>
+                      <input style={input} value={newItem.description} placeholder="Optional"
+                        onChange={(e) => setNewItem((p) => ({ ...p, description: e.target.value }))} />
+                    </div>
+                    <div>
+                      <label style={label}>Food type</label>
+                      <select style={input} value={newItem.foodType}
+                        onChange={(e) => setNewItem((p) => ({ ...p, foodType: e.target.value }))}>
+                        <option value="veg">Veg</option>
+                        <option value="nonveg">Non-veg</option>
+                      </select>
+                    </div>
+                  </div>
 
-              <VariationsAddonsEditor form={newItem} setForm={setNewItem} inputStyle={input} labelStyle={label} />
+                  <div style={{ display: "flex", gap: 18, marginBottom: 14, flexWrap: "wrap" }}>
+                    {[["chefSpecial", "👨‍🍳 Chef's Special"], ["featured", "⭐ Featured"], ["bogoEnabled", "🎁 Buy 1 Get 1 Free"]].map(([key, lbl]) => (
+                      <label key={key} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                        <input type="checkbox" checked={!!newItem[key]} onChange={(e) => setNewItem((p) => ({ ...p, [key]: e.target.checked }))} />
+                        {lbl}
+                      </label>
+                    ))}
+                  </div>
 
-              <button style={btnPrimary} disabled={busy || !newItem.name.trim() || !newItem.price}
-                onClick={() => run(async () => {
-                  await addMasterItem(brandId, { ...newItem, variations: cleanRows(newItem.variations), addons: cleanRows(newItem.addons) });
-                  setNewItem({
-                    name: "", price: "", category: newItem.category, foodType: "veg", description: "", etaMinutes: "",
-                    chefSpecial: false, featured: false, bogoEnabled: false, variations: [], addons: [],
-                  });
-                })}>
-                Add item
-              </button>
+                  <VariationsAddonsEditor form={newItem} setForm={setNewItem} inputStyle={input} labelStyle={label} />
+
+                  <button style={btnPrimary} disabled={busy || !newItem.name.trim() || !newItem.price}
+                    onClick={() => run(async () => {
+                      await addMasterItem(brandId, { ...newItem, variations: cleanRows(newItem.variations), addons: cleanRows(newItem.addons) });
+                      setNewItem({
+                        name: "", price: "", category: newItem.category, foodType: "veg", description: "", etaMinutes: "", imageUrl: "",
+                        chefSpecial: false, featured: false, bogoEnabled: false, variations: [], addons: [],
+                      });
+                      setShowAddItemForm(false);
+                    })}>
+                    Add item
+                  </button>
+                </div>
+              )}
             </div>
 
+            {showBulkImport && (
             <div style={card}>
               <h3 style={{ fontSize: 14.5, fontWeight: 800, margin: "0 0 4px" }}>Bulk import</h3>
               <p style={{ fontSize: 12.5, color: "#888", margin: "0 0 14px", lineHeight: 1.6 }}>
@@ -687,6 +759,7 @@ Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,,,,1
                 </div>
               )}
             </div>
+            )}
 
             <div style={card}>
               <h3 style={{ fontSize: 14.5, fontWeight: 800, margin: "0 0 12px" }}>{master.length} item{master.length === 1 ? "" : "s"}</h3>
@@ -694,11 +767,27 @@ Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,,,,1
                 <p style={{ color: "#888", fontSize: 14 }}>Nothing here yet. Items you add become available to every outlet.</p>
               ) : master.map((m) => editingMasterId === m.id ? (
                 <div key={m.id} style={{ padding: "14px 0", borderTop: "1px solid #f0ebe3" }}>
-                  <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 10 }}>
+                  <div style={{ display: "flex", gap: 16, marginBottom: 10, flexWrap: "wrap" }}>
                     <div>
+                      <label style={label}>Photo</label>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        {editMasterForm.imageUrl && (
+                          <img src={editMasterForm.imageUrl} alt="" style={{ width: 52, height: 52, borderRadius: 10, objectFit: "cover", border: "1px solid #e6e1d6" }} />
+                        )}
+                        <input ref={editItemFileRef} type="file" accept="image/*" style={{ display: "none" }}
+                          onChange={(e) => uploadMasterItemImage(e.target.files?.[0], true)} />
+                        <button type="button" style={{ ...btn, padding: "9px 14px", fontSize: 12.5, border: "2px dashed #e6e1d6" }}
+                          disabled={editItemUploading} onClick={() => editItemFileRef.current?.click()}>
+                          {editItemUploading ? "Uploading…" : editMasterForm.imageUrl ? "Change photo" : "Choose photo"}
+                        </button>
+                      </div>
+                    </div>
+                    <div style={{ flex: 1, minWidth: 200 }}>
                       <label style={label}>Item name</label>
                       <input style={input} value={editMasterForm.name} onChange={(e) => setEditMasterForm((p) => ({ ...p, name: e.target.value }))} />
                     </div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 10 }}>
                     <div>
                       <label style={label}>Price</label>
                       <input style={input} type="number" value={editMasterForm.price} onChange={(e) => setEditMasterForm((p) => ({ ...p, price: e.target.value }))} />
@@ -707,8 +796,12 @@ Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,,,,1
                       <label style={label}>Category</label>
                       <input style={input} value={editMasterForm.category} onChange={(e) => setEditMasterForm((p) => ({ ...p, category: e.target.value }))} />
                     </div>
+                    <div>
+                      <label style={label}>Prep time (min)</label>
+                      <input style={input} type="number" value={editMasterForm.etaMinutes} onChange={(e) => setEditMasterForm((p) => ({ ...p, etaMinutes: e.target.value }))} />
+                    </div>
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 10 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 10 }}>
                     <div>
                       <label style={label}>Description</label>
                       <input style={input} value={editMasterForm.description} onChange={(e) => setEditMasterForm((p) => ({ ...p, description: e.target.value }))} />
@@ -719,10 +812,6 @@ Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,,,,1
                         <option value="veg">Veg</option>
                         <option value="nonveg">Non-veg</option>
                       </select>
-                    </div>
-                    <div>
-                      <label style={label}>Prep time (min)</label>
-                      <input style={input} type="number" value={editMasterForm.etaMinutes} onChange={(e) => setEditMasterForm((p) => ({ ...p, etaMinutes: e.target.value }))} />
                     </div>
                   </div>
                   <div style={{ display: "flex", gap: 18, marginBottom: 14, flexWrap: "wrap" }}>
