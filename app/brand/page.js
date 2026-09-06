@@ -16,7 +16,7 @@ import {
   fetchOutlets, fetchBrandToday, createOutlet, renameOutlet,
   fetchMasterMenu, addMasterItem, updateMasterItem, deleteMasterItem,
   listBrandMembers, listOutletStaff, removeBrandMember, removeOutletStaff,
-  importMasterItems, updateMyProfile, updateBrandIdentity,
+  importMasterItems, updateMyProfile, updateBrandIdentity, fetchOutletMenuPricing,
 } from "@/lib/brand";
 import {
   parseMenuText, MENU_CSV_TEMPLATE, extractZipEntries, matchImageFile, uploadWithConcurrency,
@@ -56,6 +56,11 @@ function BrandConsoleInner() {
   const [outlets, setOutlets] = useState([]);
   const [today, setToday] = useState(null);
   const [master, setMaster] = useState([]);
+  // outletId -> { itemNameLower: { price, available } } — what each outlet is
+  // actually charging right now, read-only, for the master menu view. See
+  // fetchOutletMenuPricing's docblock for why this is never used to enforce
+  // anything: outlets own their price after seeding, on purpose.
+  const [outletMenuPricing, setOutletMenuPricing] = useState({});
   const [invites, setInvites] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -113,7 +118,7 @@ function BrandConsoleInner() {
       }
     };
 
-    const [o, t, m, inv, mem, st] = await Promise.all([
+    const [o, t, m, inv, mem, st, pricing] = await Promise.all([
       attempt("outlets", () => fetchOutlets(ids), []),
       attempt("today's figures", () => fetchBrandToday(ids), null),
       can(access, "editMasterMenu")
@@ -122,11 +127,17 @@ function BrandConsoleInner() {
       attempt("invitations", () => listInvites(brandId), []),
       attempt("managers", () => listBrandMembers(brandId), []),
       Promise.all(ids.map((id) => listOutletStaff(id))).then((r) => r.flat()),
+      // Same gate as the master menu itself — no reason to read every
+      // outlet's full menu collection for a role that can't see this tab.
+      can(access, "editMasterMenu")
+        ? attempt("outlet pricing", () => fetchOutletMenuPricing(ids), {})
+        : Promise.resolve({}),
     ]);
 
     setOutlets(o);
     setToday(t);
     setMaster(m);
+    setOutletMenuPricing(pricing);
     setInvites(inv);
     setMembers(mem);
     setStaff(st);
@@ -740,8 +751,33 @@ Garlic Naan,80,Breads & Rice,Soft naan brushed with garlic butter,veg,no,no,,,,1
                       {m.addons?.length > 0 && <span style={{ background: "#4338ca", color: "#fff", fontSize: 10, fontWeight: 800, padding: "2px 8px", borderRadius: 100 }}>+{m.addons.length} ADD-ONS</span>}
                     </div>
                     <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
-                      {m.category} · {m.variations?.length > 0 ? `From ${money(Math.min(...m.variations.map((v) => v.price)))}` : money(m.price)}
+                      {m.category} · Template {m.variations?.length > 0 ? `From ${money(Math.min(...m.variations.map((v) => v.price)))}` : money(m.price)}
                     </div>
+                    {/* What each outlet is actually charging right now — read-only,
+                        since outlets own their price once seeded. Not a discrepancy
+                        to flag red; a differing price here is normal, expected, and
+                        often deliberate (rent, local competition, delivery radius). */}
+                    {outlets.length > 0 && (
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                        {outlets.map((o) => {
+                          const live = outletMenuPricing[o.id]?.[m.name.trim().toLowerCase()];
+                          if (!live) {
+                            return (
+                              <span key={o.id} style={{ fontSize: 11, color: "#bbb", background: "#faf9f7", border: "1px dashed #e6e1d6", padding: "2px 8px", borderRadius: 100 }}>
+                                {o.name}: not on menu
+                              </span>
+                            );
+                          }
+                          const differs = live.price !== m.price;
+                          return (
+                            <span key={o.id} title={differs ? `Template is ${money(m.price)}` : "Matches the template price"}
+                              style={{ fontSize: 11, fontWeight: differs ? 700 : 400, color: differs ? "#b45309" : "#555", background: differs ? "#fef3c7" : "#f3efe6", padding: "2px 8px", borderRadius: 100 }}>
+                              {o.name}: {money(live.price)}{!live.available && " · 86'd"}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                   <button style={{ ...btn, padding: "6px 11px", fontSize: 12.5 }} onClick={() => startEditMaster(m)}>
                     Edit

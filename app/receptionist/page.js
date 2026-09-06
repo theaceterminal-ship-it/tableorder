@@ -79,6 +79,9 @@ const WAITER_REASONS = [
 
 
 const ORDER_SECTIONS = [
+  // Everything below in one feed, badged by its own status — no need to jump
+  // between tabs just to see what's happening across the floor right now.
+  { key: "all", label: "All", color: "#1a1a2e", emptyMsg: "No live orders right now.", emptyIcon: "✅" },
   { key: "pending", label: "New", color: "#f59e0b", emptyMsg: "No new orders waiting.", emptyIcon: "🔔" },
   { key: "active", label: "In Kitchen", color: "#3b82f6", emptyMsg: "Nothing cooking right now.", emptyIcon: "👨‍🍳" },
   { key: "served", label: "Served", color: "#6b7280", emptyMsg: "No tables waiting on a bill.", emptyIcon: "🍽️" },
@@ -123,12 +126,16 @@ function StatCard({ label, value, color, sub, onClick }) {
 // A party across tables 1 and 2 is ONE group of guests eating together and one
 // bill, so showing it as two unrelated cards is both confusing on a busy floor
 // and how you end up handing them two bills.
-function OrderCard({ order, children, onMoveClick, groupTables, sourceTables, delivery, rider }) {
+// statusBadge: only set in the "All" feed, where cards from every stage sit
+// together and need their own stage called out — the dedicated per-status
+// tabs already say what they are via the tab itself, so it stays unset there.
+function OrderCard({ order, children, onMoveClick, groupTables, sourceTables, delivery, rider, statusBadge }) {
   const isGroup = groupTables && groupTables.length > 1;
   const typeMeta = orderTypeMeta(order.orderType);
   const forDelivery = isDelivery(order);
   return (
     <div className="card" style={{ padding: 16, borderRadius: 14, animation: "riseIn 0.3s ease", position: "relative", borderLeft: order.isVIP ? "4px solid #eab308" : (order.orderType === "takeaway" ? "4px solid #8b5cf6" : undefined) }}>
+      {statusBadge && <span style={{ position: "absolute", top: -8, left: 10, background: statusBadge.color, color: "#fff", fontSize: 10, fontWeight: 800, padding: "2px 9px", borderRadius: 100 }}>{statusBadge.label}</span>}
       {order.isVIP && <span style={{ position: "absolute", top: -8, right: 10, background: "#eab308", color: "#1a1a2e", fontSize: 10, fontWeight: 800, padding: "2px 9px", borderRadius: 100 }}>VIP</span>}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -405,7 +412,7 @@ function ReceptionPage() {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [dashboardView, setDashboardView] = useState("main"); // main | sales | orders | items
   const [analyticsFilter, setAnalyticsFilter] = useState("today"); // today | 3days | week | month
-  const [orderFilter, setOrderFilter] = useState("pending");
+  const [orderFilter, setOrderFilter] = useState("all");
   const [tick, setTick] = useState(0);
   const [profileForm, setProfileForm] = useState({ name: "", tagline: "", logoUrl: "", address: "" });
   const [savedMsg, setSavedMsg] = useState(false);
@@ -783,7 +790,10 @@ function ReceptionPage() {
     };
   }
 
-  const orderDataByKey = { pending, active, served, billRequested, billed };
+  // "all" exists purely for the tab-count badge — the actual combined,
+  // per-order-correctly-rendered list for that tab is built in
+  // renderDashboard(), since each status needs its own card layout.
+  const orderDataByKey = { all: [...pending, ...active, ...served, ...billRequested, ...billed], pending, active, served, billRequested, billed };
 
   useEffect(() => {
     if (pending.length > lastPendingCount && lastPendingCount > 0) {
@@ -2473,18 +2483,34 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
     // One card per PARTY, not per order. A merged table is one group of guests
     // eating together and paying once, so two cards for tables 1 and 2 is both
     // wrong on the floor and how they end up with two bills.
-    const groups = collapseMergedGroups(orderDataByKey[orderFilter] || []);
+    //
+    // Grouped per real status always, not just for the active tab — "All"
+    // below needs every status's groups at once, tagged with which one they
+    // came from so the right card template still gets used for each.
+    const groupsByStatus = {
+      pending: collapseMergedGroups(orderDataByKey.pending),
+      active: collapseMergedGroups(orderDataByKey.active),
+      served: collapseMergedGroups(orderDataByKey.served),
+      billRequested: collapseMergedGroups(orderDataByKey.billRequested),
+      billed: collapseMergedGroups(orderDataByKey.billed),
+    };
 
     // Billed rows carry the consolidated bill on every sibling (so each table's
     // own device can display it), so a group must show exactly one of them.
     const billedTableLabels = {};
-    if (orderFilter === "billed") {
-      groups.forEach((g) => {
-        const tableNumbers = g.rep.mergedTables?.length ? g.rep.mergedTables : g.tables;
-        billedTableLabels[g.raw.id] = [...new Set(tableNumbers)].join(" + ");
-      });
-    }
-    const currentData = groups;
+    groupsByStatus.billed.forEach((g) => {
+      const tableNumbers = g.rep.mergedTables?.length ? g.rep.mergedTables : g.tables;
+      billedTableLabels[g.raw.id] = [...new Set(tableNumbers)].join(" + ");
+    });
+
+    // "All" concatenates every status in the same priority order the tabs
+    // are shown in — new orders needing a decision first, paid ones last —
+    // rather than a strict chronological interleave.
+    const currentData = orderFilter === "all"
+      ? ["pending", "active", "served", "billRequested", "billed"].flatMap(
+          (status) => groupsByStatus[status].map((g) => ({ ...g, _status: status }))
+        )
+      : groupsByStatus[orderFilter] || [];
 
     return (
       <div>
@@ -2580,120 +2606,137 @@ Chocolate Lava Cake,220,Desserts,Warm cake with molten chocolate center,veg,no,y
             ) : (
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
                 {/* Actions apply to every order in the party, so confirming a
-                    merged table sends all of it to the kitchen at once. */}
-                {orderFilter === "pending" && currentData.map((g) => (
-                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]} rider={riderAssignments[g.rep.id]}>
-                    <button className="btn btn-sm btn-danger" style={{ flex: 1 }}
-                      onClick={() => g.orders.forEach((o) => declineOrder(o.id))}>Decline</button>
-                    <button className="btn btn-sm btn-primary" style={{ flex: 1 }}
-                      onClick={() => g.orders.forEach((o) => confirmOrder(o.id))}>Confirm → Kitchen</button>
-                  </OrderCard>
-                ))}
-                {orderFilter === "active" && currentData.map((g) => (
-                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]} rider={riderAssignments[g.rep.id]} onMoveClick={g.tables.length > 1 ? undefined : openMoveOrder}>
-                    {nextDeliveryAction(g.rep) === "dispatch" ? (
-                      <button className="btn btn-sm btn-primary" style={{ width: "100%" }}
-                        onClick={() => { setDispatchOrder(g.rep); setSelectedRiderId(""); setRiderErrors({}); }}>
-                        🛵 Hand to rider
-                      </button>
-                    ) : nextDeliveryAction(g.rep) === "deliver" ? (
-                      <>
-                        {/* The bill exists from the moment the rider took it,
-                            so it can be reprinted for the bag or the customer
-                            without waiting for the order to be settled. */}
-                        {g.rep.billId && (
-                          <button className="btn btn-sm btn-ghost" style={{ flex: 1 }}
-                            onClick={() => printBill(g.rep)}>
-                            🖨 Bill
+                    merged table sends all of it to the kitchen at once.
+                    One map, branching on status — the same status branches
+                    that used to be five separate top-level maps (one per
+                    tab) now also serve the combined "All" tab, where each
+                    group carries which status it came from in g._status. */}
+                {currentData.map((g) => {
+                  const status = orderFilter === "all" ? g._status : orderFilter;
+                  // Only the combined feed needs a badge — a dedicated tab
+                  // already says what it's showing via the tab itself.
+                  const statusBadge = orderFilter === "all"
+                    ? { color: ORDER_SECTIONS.find((s) => s.key === status)?.color, label: ORDER_SECTIONS.find((s) => s.key === status)?.label }
+                    : undefined;
+
+                  if (status === "pending") {
+                    return (
+                      <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]} rider={riderAssignments[g.rep.id]} statusBadge={statusBadge}>
+                        <button className="btn btn-sm btn-danger" style={{ flex: 1 }}
+                          onClick={() => g.orders.forEach((o) => declineOrder(o.id))}>Decline</button>
+                        <button className="btn btn-sm btn-primary" style={{ flex: 1 }}
+                          onClick={() => g.orders.forEach((o) => confirmOrder(o.id))}>Confirm → Kitchen</button>
+                      </OrderCard>
+                    );
+                  }
+                  if (status === "active") {
+                    return (
+                      <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]} rider={riderAssignments[g.rep.id]} onMoveClick={g.tables.length > 1 ? undefined : openMoveOrder} statusBadge={statusBadge}>
+                        {nextDeliveryAction(g.rep) === "dispatch" ? (
+                          <button className="btn btn-sm btn-primary" style={{ width: "100%" }}
+                            onClick={() => { setDispatchOrder(g.rep); setSelectedRiderId(""); setRiderErrors({}); }}>
+                            🛵 Hand to rider
                           </button>
+                        ) : nextDeliveryAction(g.rep) === "deliver" ? (
+                          <>
+                            {/* The bill exists from the moment the rider took it,
+                                so it can be reprinted for the bag or the customer
+                                without waiting for the order to be settled. */}
+                            {g.rep.billId && (
+                              <button className="btn btn-sm btn-ghost" style={{ flex: 1 }}
+                                onClick={() => printBill(g.rep)}>
+                                🖨 Bill
+                              </button>
+                            )}
+                            <button className="btn btn-sm btn-success" style={{ flex: 2 }}
+                              onClick={() => markDelivered(g.rep)}>
+                              ✓ Mark delivered
+                            </button>
+                          </>
+                        ) : g.orders.some((o) => o.status === "ready") ? (
+                          <button className="btn btn-sm btn-success" style={{ width: "100%" }}
+                            onClick={() => g.orders.filter((o) => o.status === "ready").forEach((o) => markServed(o.id))}>
+                            Mark as Served
+                          </button>
+                        ) : (
+                          <div style={{ fontSize: 12, color: "var(--text-secondary, #6b6b7b)", width: "100%", textAlign: "center" }}>Managed from the kitchen screen</div>
                         )}
-                        <button className="btn btn-sm btn-success" style={{ flex: 2 }}
-                          onClick={() => markDelivered(g.rep)}>
-                          ✓ Mark delivered
+                      </OrderCard>
+                    );
+                  }
+                  if (status === "served" || status === "billRequested") {
+                    return (
+                      <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]} rider={riderAssignments[g.rep.id]} statusBadge={statusBadge}>
+                        <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(g.rep)} style={{ flex: 1 }}>
+                          Generate {g.tables.length > 1 ? "one bill" : "Bill"}
                         </button>
-                      </>
-                    ) : g.orders.some((o) => o.status === "ready") ? (
-                      <button className="btn btn-sm btn-success" style={{ width: "100%" }}
-                        onClick={() => g.orders.filter((o) => o.status === "ready").forEach((o) => markServed(o.id))}>
-                        Mark as Served
-                      </button>
-                    ) : (
-                      <div style={{ fontSize: 12, color: "var(--text-secondary, #6b6b7b)", width: "100%", textAlign: "center" }}>Managed from the kitchen screen</div>
-                    )}
-                  </OrderCard>
-                ))}
-                {orderFilter === "served" && currentData.map((g) => (
-                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]} rider={riderAssignments[g.rep.id]}>
-                    <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(g.rep)} style={{ flex: 1 }}>
-                      Generate {g.tables.length > 1 ? "one bill" : "Bill"}
-                    </button>
-                  </OrderCard>
-                ))}
-                {orderFilter === "billRequested" && currentData.map((g) => (
-                  <OrderCard key={g.key} order={g.rep} groupTables={g.tables} delivery={deliveryDetails[g.rep.id]} rider={riderAssignments[g.rep.id]}>
-                    <button className="btn btn-sm btn-primary" onClick={() => openGenerateBill(g.rep)} style={{ flex: 1 }}>
-                      Generate {g.tables.length > 1 ? "one bill" : "Bill"}
-                    </button>
-                  </OrderCard>
-                ))}
-                {orderFilter === "billed" && currentData.map(({ raw: o }) => (
-                  <div key={o.id} className="card" style={{ padding: 16, borderRadius: 14 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                      <span style={{ fontWeight: 700 }}>
-                        Table {billedTableLabels[o.id] || orderTableLabel(o)}
-                      </span>
-                      <span className="badge badge-billed">billed</span>
-                    </div>
-                    {(customerFor(o).name || customerFor(o).phone || o.paymentMethod) && (
-                      <div style={{ fontSize: 11.5, color: "#888", marginBottom: 8, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                        {(customerFor(o).name || customerFor(o).phone) && <span>👤 {customerFor(o).name} {customerFor(o).phone ? `· ${customerFor(o).phone}` : ""}</span>}
-                        {o.paymentMethod && <span style={{ textTransform: "capitalize" }}>💳 {o.paymentMethod}</span>}
+                      </OrderCard>
+                    );
+                  }
+                  // status === "billed" — its own hand-built card rather than
+                  // OrderCard, since a settled bill shows line items, payment
+                  // info and split/UPI state that no other status needs.
+                  const o = g.raw;
+                  return (
+                    <div key={o.id} className="card" style={{ padding: 16, borderRadius: 14, position: "relative" }}>
+                      {statusBadge && <span style={{ position: "absolute", top: -8, left: 10, background: statusBadge.color, color: "#fff", fontSize: 10, fontWeight: 800, padding: "2px 9px", borderRadius: 100 }}>{statusBadge.label}</span>}
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                        <span style={{ fontWeight: 700 }}>
+                          Table {billedTableLabels[o.id] || orderTableLabel(o)}
+                        </span>
+                        <span className="badge badge-billed">billed</span>
                       </div>
-                    )}
-                    {o.items.map((it, i) => (
-                      <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13.5, padding: "3px 0" }}>
-                        <span>{it.name} ×{it.qty}</span><span>₹{it.price * it.qty}</span>
-                      </div>
-                    ))}
-                    {o.billDiscounts && o.billDiscounts.length > 0 && o.billDiscounts.map((d, i) => (
-                      <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "2px 0", color: "#16a34a" }}>
-                        <span>{d.name}</span><span>-₹{d.amount}</span>
-                      </div>
-                    ))}
-                    <div style={{ borderTop: "1px dashed var(--border, #e6e1d6)", marginTop: 10, paddingTop: 10 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, fontSize: 16 }}><span>Total</span><span>₹{o.billTotal}</span></div>
-                    </div>
-
-                    {o.upiPayLink && (
-                      <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: "#eff6ff", border: "1px solid #dbeafe", textAlign: "center" }}>
-                        <div style={{ fontSize: 11.5, fontWeight: 800, color: "#1e40af", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>Customer Self-Pay (UPI)</div>
-                        <img src={o.paymentQrUrl} alt="Scan to pay" style={{ width: 120, height: 120, marginBottom: 8, borderRadius: 8, background: "#fff" }} />
-                        <div style={{ display: "flex", gap: 6 }}>
-                          <a href={o.upiPayLink} className="btn btn-sm btn-primary" style={{ flex: 1, textDecoration: "none" }}>Open in UPI App</a>
-                          <button className="btn btn-sm btn-ghost" onClick={() => { navigator.clipboard.writeText(o.upiPayLink); alert("Payment link copied"); }}>Copy Link</button>
+                      {(customerFor(o).name || customerFor(o).phone || o.paymentMethod) && (
+                        <div style={{ fontSize: 11.5, color: "#888", marginBottom: 8, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                          {(customerFor(o).name || customerFor(o).phone) && <span>👤 {customerFor(o).name} {customerFor(o).phone ? `· ${customerFor(o).phone}` : ""}</span>}
+                          {o.paymentMethod && <span style={{ textTransform: "capitalize" }}>💳 {o.paymentMethod}</span>}
                         </div>
-                        <div style={{ fontSize: 10.5, color: "#64748b", marginTop: 6 }}>Scan or tap to pay — then confirm below once it lands in your UPI app.</div>
+                      )}
+                      {o.items.map((it, i) => (
+                        <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13.5, padding: "3px 0" }}>
+                          <span>{it.name} ×{it.qty}</span><span>₹{it.price * it.qty}</span>
+                        </div>
+                      ))}
+                      {o.billDiscounts && o.billDiscounts.length > 0 && o.billDiscounts.map((d, i) => (
+                        <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "2px 0", color: "#16a34a" }}>
+                          <span>{d.name}</span><span>-₹{d.amount}</span>
+                        </div>
+                      ))}
+                      <div style={{ borderTop: "1px dashed var(--border, #e6e1d6)", marginTop: 10, paddingTop: 10 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, fontSize: 16 }}><span>Total</span><span>₹{o.billTotal}</span></div>
                       </div>
-                    )}
 
-                    {o.billSplits && o.billSplits.length > 0 ? (
-                      <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6 }}>
-                        {o.billSplits.map((s) => (
-                          <div key={s.index} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface-2, #f3efe6)", padding: "8px 12px", borderRadius: 8, fontSize: 13 }}>
-                            <span>Guest {s.index} · ₹{s.amount}</span>
-                            {s.paid ? <span style={{ color: "#16a34a", fontWeight: 700 }}>Paid ✓</span> : <button className="btn btn-sm btn-success" onClick={() => markSplitPaid(o, s.index)}>Mark Paid</button>}
+                      {o.upiPayLink && (
+                        <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: "#eff6ff", border: "1px solid #dbeafe", textAlign: "center" }}>
+                          <div style={{ fontSize: 11.5, fontWeight: 800, color: "#1e40af", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>Customer Self-Pay (UPI)</div>
+                          <img src={o.paymentQrUrl} alt="Scan to pay" style={{ width: 120, height: 120, marginBottom: 8, borderRadius: 8, background: "#fff" }} />
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <a href={o.upiPayLink} className="btn btn-sm btn-primary" style={{ flex: 1, textDecoration: "none" }}>Open in UPI App</a>
+                            <button className="btn btn-sm btn-ghost" onClick={() => { navigator.clipboard.writeText(o.upiPayLink); alert("Payment link copied"); }}>Copy Link</button>
                           </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                        <button className="btn btn-sm btn-ghost" onClick={() => printBill(o)} style={{ flex: 1 }}>Print</button>
-                        {features.splitBill && <button className="btn btn-sm btn-ghost" onClick={() => openSplitBill(o)} style={{ flex: 1 }}>Split Bill</button>}
-                        <button className="btn btn-sm btn-success" onClick={() => handleMarkPaidClick(o)} style={{ flex: 1 }}>Mark Paid</button>
-                      </div>
-                    )}
-                  </div>
-                ))}
+                          <div style={{ fontSize: 10.5, color: "#64748b", marginTop: 6 }}>Scan or tap to pay — then confirm below once it lands in your UPI app.</div>
+                        </div>
+                      )}
+
+                      {o.billSplits && o.billSplits.length > 0 ? (
+                        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+                          {o.billSplits.map((s) => (
+                            <div key={s.index} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface-2, #f3efe6)", padding: "8px 12px", borderRadius: 8, fontSize: 13 }}>
+                              <span>Guest {s.index} · ₹{s.amount}</span>
+                              {s.paid ? <span style={{ color: "#16a34a", fontWeight: 700 }}>Paid ✓</span> : <button className="btn btn-sm btn-success" onClick={() => markSplitPaid(o, s.index)}>Mark Paid</button>}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                          <button className="btn btn-sm btn-ghost" onClick={() => printBill(o)} style={{ flex: 1 }}>Print</button>
+                          {features.splitBill && <button className="btn btn-sm btn-ghost" onClick={() => openSplitBill(o)} style={{ flex: 1 }}>Split Bill</button>}
+                          <button className="btn btn-sm btn-success" onClick={() => handleMarkPaidClick(o)} style={{ flex: 1 }}>Mark Paid</button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
